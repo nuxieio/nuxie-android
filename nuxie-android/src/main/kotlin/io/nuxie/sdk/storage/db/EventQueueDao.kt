@@ -19,7 +19,9 @@ internal interface EventQueueDao {
   @Query("DELETE FROM nuxie_event_queue WHERE id IN (:ids)")
   suspend fun delete(ids: List<String>)
 
+  @Query("UPDATE nuxie_event_queue SET distinctId = :toDistinctId WHERE distinctId = :fromDistinctId")
+  suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int
+
   @Query("DELETE FROM nuxie_event_queue")
   suspend fun clear()
 }
-

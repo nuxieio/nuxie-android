@@ -32,7 +32,7 @@ internal fun toJsonElement(value: Any?): JsonElement {
   }
 }
 
-internal fun toJsonObject(value: Map<String, Any?>): JsonObject {
+fun toJsonObject(value: Map<String, Any?>): JsonObject {
   return JsonObject(value.mapValues { (_, v) -> toJsonElement(v) })
 }
 

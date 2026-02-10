@@ -25,6 +25,20 @@ class InMemoryEventQueueStore : EventQueueStore {
     }
   }
 
+  override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+    return lock.withLock {
+      var count = 0
+      for (i in events.indices) {
+        val e = events[i]
+        if (e.distinctId == fromDistinctId) {
+          events[i] = e.copy(distinctId = toDistinctId)
+          count += 1
+        }
+      }
+      count
+    }
+  }
+
   override suspend fun clear() = lock.withLock {
     events.clear()
   }

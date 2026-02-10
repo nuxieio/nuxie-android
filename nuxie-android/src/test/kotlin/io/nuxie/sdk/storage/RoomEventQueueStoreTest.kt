@@ -46,4 +46,38 @@ class RoomEventQueueStoreTest {
       db.close()
     }
   }
+
+  @Test
+  fun reassignDistinctId_updates_rows() = runBlocking {
+    val context: Context = org.robolectric.RuntimeEnvironment.getApplication()
+    val db = Room.inMemoryDatabaseBuilder(context, NuxieDatabase::class.java)
+      .allowMainThreadQueries()
+      .build()
+    try {
+      val store = RoomEventQueueStore(db.eventQueueDao())
+      val e1 = QueuedEvent(
+        name = "e1",
+        distinctId = "anon",
+        timestamp = "t",
+        properties = JsonObject(emptyMap()),
+      )
+      val e2 = QueuedEvent(
+        name = "e2",
+        distinctId = "anon",
+        timestamp = "t",
+        properties = JsonObject(emptyMap()),
+      )
+
+      store.enqueue(e1)
+      store.enqueue(e2)
+
+      val updated = store.reassignDistinctId(fromDistinctId = "anon", toDistinctId = "user_1")
+      assertEquals(2, updated)
+
+      val peeked = store.peek(10)
+      assertEquals(listOf("user_1", "user_1"), peeked.map { it.distinctId })
+    } finally {
+      db.close()
+    }
+  }
 }

@@ -95,4 +95,13 @@ class EventService(
   suspend fun pauseEventQueue() = networkQueue.pause()
 
   suspend fun resumeEventQueue() = networkQueue.resume()
+
+  /**
+   * Reassign queued events from one distinctId to another.
+   *
+   * This is used for anonymous -> identified linking when `eventLinkingPolicy` is `migrateOnIdentify`.
+   */
+  suspend fun reassignEvents(fromDistinctId: String, toDistinctId: String): Int {
+    return store.reassignDistinctId(fromDistinctId = fromDistinctId, toDistinctId = toDistinctId)
+  }
 }

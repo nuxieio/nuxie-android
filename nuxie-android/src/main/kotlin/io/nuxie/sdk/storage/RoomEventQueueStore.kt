@@ -23,6 +23,9 @@ internal class RoomEventQueueStore(
 
   override suspend fun delete(ids: List<String>) = dao.delete(ids)
 
+  override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+    return dao.reassignDistinctId(fromDistinctId = fromDistinctId, toDistinctId = toDistinctId)
+  }
+
   override suspend fun clear() = dao.clear()
 }
-

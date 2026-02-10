@@ -5,6 +5,6 @@ interface EventQueueStore {
   suspend fun size(): Int
   suspend fun peek(limit: Int): List<QueuedEvent>
   suspend fun delete(ids: List<String>)
+  suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int
   suspend fun clear()
 }
-
