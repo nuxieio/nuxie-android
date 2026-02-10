@@ -1,7 +1,7 @@
 package io.nuxie.sdk.events.queue
 
 import io.nuxie.sdk.logging.NuxieLogger
-import io.nuxie.sdk.network.NuxieApi
+import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.NuxieNetworkError
 import io.nuxie.sdk.network.models.BatchEventItem
 import io.nuxie.sdk.network.models.BatchRequest
@@ -20,7 +20,7 @@ import kotlin.math.pow
  */
 class NuxieNetworkQueue(
   private val store: EventQueueStore,
-  private val api: NuxieApi,
+  private val api: NuxieApiProtocol,
   private val scope: CoroutineScope,
   private val clock: Clock = Clock.system(),
   private val flushAt: Int,

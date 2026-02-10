@@ -1,11 +1,13 @@
 package io.nuxie.sdk.network
 
 import io.nuxie.sdk.NuxieVersion
+import io.nuxie.sdk.features.FeatureCheckResult
 import io.nuxie.sdk.network.models.ApiErrorResponse
 import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventRequest
 import io.nuxie.sdk.network.models.EventResponse
+import io.nuxie.sdk.network.models.FeatureCheckRequest
 import io.nuxie.sdk.network.models.ProfileRequest
 import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.util.Iso8601
@@ -39,7 +41,7 @@ class NuxieApi(
     explicitNulls = false
   },
   okHttpClient: OkHttpClient? = null,
-) {
+) : NuxieApiProtocol {
   private val baseHttpUrl: HttpUrl =
     baseUrl.toHttpUrlOrNull() ?: throw NuxieNetworkError.InvalidUrl(baseUrl)
 
@@ -50,7 +52,7 @@ class NuxieApi(
     .writeTimeout(60, TimeUnit.SECONDS)
     .build()
 
-  suspend fun fetchProfile(distinctId: String, locale: String? = null): ProfileResponse {
+  override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse {
     val req = ProfileRequest(distinctId = distinctId, locale = locale)
     val body = json.encodeToJsonElement(ProfileRequest.serializer(), req)
     return request(
@@ -61,15 +63,17 @@ class NuxieApi(
     )
   }
 
-  suspend fun trackEvent(
+  suspend fun fetchProfile(distinctId: String): ProfileResponse = fetchProfile(distinctId, locale = null)
+
+  override suspend fun trackEvent(
     event: String,
     distinctId: String,
-    anonDistinctId: String? = null,
-    properties: JsonObject? = null,
-    uuid: String = UuidV7.generateString(),
-    value: Double? = null,
-    entityId: String? = null,
-    timestamp: String = Iso8601.now(),
+    anonDistinctId: String?,
+    properties: JsonObject?,
+    uuid: String,
+    value: Double?,
+    entityId: String?,
+    timestamp: String,
   ): EventResponse {
     val req = EventRequest(
       event = event,
@@ -90,7 +94,27 @@ class NuxieApi(
     )
   }
 
-  suspend fun sendBatch(batch: BatchRequest): BatchResponse {
+  suspend fun trackEvent(
+    event: String,
+    distinctId: String,
+    anonDistinctId: String? = null,
+    properties: JsonObject? = null,
+    value: Double? = null,
+    entityId: String? = null,
+  ): EventResponse {
+    return trackEvent(
+      event = event,
+      distinctId = distinctId,
+      anonDistinctId = anonDistinctId,
+      properties = properties,
+      uuid = UuidV7.generateString(),
+      value = value,
+      entityId = entityId,
+      timestamp = Iso8601.now(),
+    )
+  }
+
+  override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
     val body = json.encodeToJsonElement(BatchRequest.serializer(), batch)
     return request(
       path = "/batch",
@@ -105,12 +129,33 @@ class NuxieApi(
    *
    * For now this returns a raw JsonObject; higher-level Flow models are layered on top.
    */
-  suspend fun fetchFlow(flowId: String): JsonObject {
+  override suspend fun fetchFlow(flowId: String): JsonObject {
     return request(
       path = "/flows/$flowId",
       method = "GET",
       auth = AuthMethod.API_KEY_IN_QUERY,
       body = null,
+    )
+  }
+
+  override suspend fun checkFeature(
+    customerId: String,
+    featureId: String,
+    requiredBalance: Int?,
+    entityId: String?,
+  ): FeatureCheckResult {
+    val req = FeatureCheckRequest(
+      customerId = customerId,
+      featureId = featureId,
+      requiredBalance = requiredBalance,
+      entityId = entityId,
+    )
+    val body = json.encodeToJsonElement(FeatureCheckRequest.serializer(), req)
+    return request(
+      path = "/entitled",
+      method = "POST",
+      auth = AuthMethod.API_KEY_IN_BODY,
+      body = body,
     )
   }
 

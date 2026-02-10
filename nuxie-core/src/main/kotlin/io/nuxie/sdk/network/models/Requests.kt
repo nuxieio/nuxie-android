@@ -48,3 +48,10 @@ data class BatchRequest(
   val batch: List<BatchEventItem>,
 )
 
+@Serializable
+data class FeatureCheckRequest(
+  val customerId: String,
+  val featureId: String,
+  val requiredBalance: Int? = null,
+  val entityId: String? = null,
+)

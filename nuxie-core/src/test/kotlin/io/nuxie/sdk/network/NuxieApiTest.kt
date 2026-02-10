@@ -74,6 +74,52 @@ class NuxieApiTest {
   }
 
   @Test
+  fun check_feature_includes_api_key_in_body() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody(
+          """
+          {
+            "customerId":"d1",
+            "featureId":"f1",
+            "requiredBalance":1,
+            "code":"feature_found",
+            "allowed":true,
+            "unlimited":false,
+            "balance":1,
+            "type":"boolean"
+          }
+          """.trimIndent()
+        ),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "k",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+      )
+      val res = api.checkFeature(customerId = "d1", featureId = "f1", requiredBalance = 1, entityId = null)
+      assertTrue(res.allowed)
+
+      val req = server.takeRequest()
+      assertEquals("POST", req.method)
+      assertEquals("/entitled", req.path)
+
+      val body = req.body.readUtf8()
+      val obj = json.parseToJsonElement(body).jsonObject
+      assertEquals("k", obj["apiKey"]?.toString()?.trim('"'))
+      assertEquals("d1", obj["customerId"]?.toString()?.trim('"'))
+      assertEquals("f1", obj["featureId"]?.toString()?.trim('"'))
+      assertEquals("1", obj["requiredBalance"]?.toString()?.trim('"'))
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
   fun gzip_enabled_compresses_post_body() = runBlocking {
     val server = MockWebServer()
     server.enqueue(
@@ -132,4 +178,3 @@ class NuxieApiTest {
     }
   }
 }
-

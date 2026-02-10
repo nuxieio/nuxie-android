@@ -5,6 +5,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 
 internal fun toJsonElement(value: Any?): JsonElement {
   return when (value) {
@@ -33,3 +36,18 @@ internal fun toJsonObject(value: Map<String, Any?>): JsonObject {
   return JsonObject(value.mapValues { (_, v) -> toJsonElement(v) })
 }
 
+internal fun fromJsonElement(value: JsonElement): Any? {
+  return when (value) {
+    JsonNull -> null
+    is JsonPrimitive -> {
+      if (value.isString) return value.content
+      value.booleanOrNull
+        ?: value.longOrNull
+        ?: value.doubleOrNull
+        ?: value.content
+    }
+    is JsonObject -> value.mapValues { (_, v) -> fromJsonElement(v) }
+    is JsonArray -> value.map { fromJsonElement(it) }
+    else -> null
+  }
+}
