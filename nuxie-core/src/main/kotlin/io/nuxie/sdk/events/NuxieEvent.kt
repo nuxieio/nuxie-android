@@ -1,22 +1,18 @@
 package io.nuxie.sdk.events
 
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
+import io.nuxie.sdk.util.UuidV7
+import io.nuxie.sdk.util.Iso8601
 
 /**
- * Canonical internal representation for an event that will be enqueued and sent.
+ * Enhanced event model for SDK hooks (beforeSend, sanitizers) and internal routing.
  *
- * This is the Android counterpart to iOS `NuxieEvent` + `EventRequest` layering.
+ * Mirrors iOS `NuxieEvent` shape and semantics.
  */
-@Serializable
 data class NuxieEvent(
-  val event: String,
+  val id: String = UuidV7.generateString(),
+  val name: String,
   val distinctId: String,
-  val anonDistinctId: String? = null,
-  val timestampIso8601: String? = null,
-  val properties: Map<String, JsonElement>? = null,
-  val idempotencyKey: String? = null,
-  val value: Double? = null,
-  val entityId: String? = null,
+  val properties: Map<String, Any?> = emptyMap(),
+  /** ISO8601 timestamp string (UTC). */
+  val timestamp: String = Iso8601.now(),
 )
-

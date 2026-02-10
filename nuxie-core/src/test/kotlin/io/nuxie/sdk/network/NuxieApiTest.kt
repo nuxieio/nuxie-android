@@ -1,0 +1,135 @@
+package io.nuxie.sdk.network
+
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.util.zip.GZIPInputStream
+
+class NuxieApiTest {
+  private val json = Json { ignoreUnknownKeys = true }
+
+  @Test
+  fun fetch_profile_includes_api_key_in_body() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody("{\"campaigns\":[],\"segments\":[],\"flows\":[]}"),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "test_key",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+      )
+      val res = api.fetchProfile(distinctId = "d1", locale = "en_US")
+      assertEquals(0, res.campaigns.size)
+
+      val req = server.takeRequest()
+      assertEquals("POST", req.method)
+      assertEquals("/profile", req.path)
+
+      val body = req.body.readUtf8()
+      val obj = json.parseToJsonElement(body).jsonObject
+      assertEquals("test_key", obj["apiKey"]?.toString()?.trim('"'))
+      assertEquals("d1", obj["distinct_id"]?.toString()?.trim('"'))
+      assertEquals("en_US", obj["locale"]?.toString()?.trim('"'))
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
+  fun fetch_flow_puts_api_key_in_query() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody("{\"id\":\"flow_1\"}"),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "k",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+      )
+      val flow = api.fetchFlow("flow_1")
+      assertEquals("flow_1", flow["id"]?.toString()?.trim('"'))
+
+      val req = server.takeRequest()
+      assertEquals("GET", req.method)
+      assertTrue(req.path!!.startsWith("/flows/flow_1?"))
+      assertTrue(req.path!!.contains("apiKey=k"))
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
+  fun gzip_enabled_compresses_post_body() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(200)
+        .setHeader("Content-Type", "application/json")
+        .setBody("{\"status\":\"ok\"}"),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "k",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+        useGzipCompression = true,
+      )
+      api.trackEvent(event = "test", distinctId = "d1")
+
+      val req = server.takeRequest()
+      assertEquals("gzip", req.getHeader("Content-Encoding"))
+
+      val gzBytes = req.body.readByteArray()
+      val decompressed = GZIPInputStream(ByteArrayInputStream(gzBytes)).readBytes()
+        .toString(Charsets.UTF_8)
+      val obj = json.parseToJsonElement(decompressed).jsonObject
+      assertEquals("k", obj["apiKey"]?.toString()?.trim('"'))
+      assertEquals("test", obj["event"]?.toString()?.trim('"'))
+      assertEquals("d1", obj["distinct_id"]?.toString()?.trim('"'))
+    } finally {
+      server.shutdown()
+    }
+  }
+
+  @Test
+  fun http_error_throws_http_error_with_status_code() = runBlocking {
+    val server = MockWebServer()
+    server.enqueue(
+      MockResponse()
+        .setResponseCode(400)
+        .setHeader("Content-Type", "application/json")
+        .setBody("{\"message\":\"bad\"}"),
+    )
+    server.start()
+    try {
+      val api = NuxieApi(
+        apiKey = "k",
+        baseUrl = server.url("/").toString().removeSuffix("/"),
+      )
+      try {
+        api.fetchProfile(distinctId = "d1")
+        throw AssertionError("Expected exception")
+      } catch (e: NuxieNetworkError.HttpError) {
+        assertEquals(400, e.statusCode)
+      }
+    } finally {
+      server.shutdown()
+    }
+  }
+}
+
