@@ -53,7 +53,27 @@ class NuxieApiTest {
       MockResponse()
         .setResponseCode(200)
         .setHeader("Content-Type", "application/json")
-        .setBody("{\"id\":\"flow_1\"}"),
+        .setBody(
+          """
+          {
+            "id": "flow_1",
+            "bundle": {
+              "url": "https://example.com/flows/flow_1/",
+              "manifest": {
+                "totalFiles": 1,
+                "totalSize": 10,
+                "contentHash": "sha256:abc",
+                "files": [
+                  { "path": "index.html", "size": 10, "contentType": "text/html" }
+                ]
+              }
+            },
+            "screens": [{ "id": "screen_1" }],
+            "interactions": {},
+            "viewModels": []
+          }
+          """.trimIndent()
+        ),
     )
     server.start()
     try {
@@ -62,7 +82,7 @@ class NuxieApiTest {
         baseUrl = server.url("/").toString().removeSuffix("/"),
       )
       val flow = api.fetchFlow("flow_1")
-      assertEquals("flow_1", flow["id"]?.toString()?.trim('"'))
+      assertEquals("flow_1", flow.id)
 
       val req = server.takeRequest()
       assertEquals("GET", req.method)

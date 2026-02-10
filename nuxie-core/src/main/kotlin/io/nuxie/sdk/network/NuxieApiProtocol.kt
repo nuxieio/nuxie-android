@@ -1,6 +1,7 @@
 package io.nuxie.sdk.network
 
 import io.nuxie.sdk.features.FeatureCheckResult
+import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventResponse
@@ -28,7 +29,7 @@ interface NuxieApiProtocol {
 
   suspend fun sendBatch(batch: BatchRequest): BatchResponse
 
-  suspend fun fetchFlow(flowId: String): JsonObject
+  suspend fun fetchFlow(flowId: String): RemoteFlow
 
   suspend fun checkFeature(
     customerId: String,
@@ -37,4 +38,3 @@ interface NuxieApiProtocol {
     entityId: String? = null,
   ): FeatureCheckResult
 }
-

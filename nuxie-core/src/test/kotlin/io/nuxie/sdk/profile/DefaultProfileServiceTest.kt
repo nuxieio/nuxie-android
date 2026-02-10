@@ -1,6 +1,7 @@
 package io.nuxie.sdk.profile
 
 import io.nuxie.sdk.config.NuxieConfiguration
+import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.BatchRequest
@@ -50,7 +51,7 @@ class DefaultProfileServiceTest {
       throw UnsupportedOperationException()
     }
 
-    override suspend fun fetchFlow(flowId: String): JsonObject {
+    override suspend fun fetchFlow(flowId: String): RemoteFlow {
       throw UnsupportedOperationException()
     }
 

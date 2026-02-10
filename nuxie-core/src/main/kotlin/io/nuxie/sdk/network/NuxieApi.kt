@@ -2,6 +2,7 @@ package io.nuxie.sdk.network
 
 import io.nuxie.sdk.NuxieVersion
 import io.nuxie.sdk.features.FeatureCheckResult
+import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.network.models.ApiErrorResponse
 import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
@@ -127,9 +128,9 @@ class NuxieApi(
   /**
    * Fetch a flow JSON payload.
    *
-   * For now this returns a raw JsonObject; higher-level Flow models are layered on top.
+   * Mirrors iOS `NuxieApi.fetchFlow(...)` (returns a `RemoteFlow`).
    */
-  override suspend fun fetchFlow(flowId: String): JsonObject {
+  override suspend fun fetchFlow(flowId: String): RemoteFlow {
     return request(
       path = "/flows/$flowId",
       method = "GET",
