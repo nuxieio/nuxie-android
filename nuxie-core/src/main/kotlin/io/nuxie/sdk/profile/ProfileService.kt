@@ -43,6 +43,11 @@ class DefaultProfileService(
   private val store: CachedProfileStore,
   private val scope: CoroutineScope,
   private val clock: Clock = Clock.system(),
+  private val onProfileUpdated: suspend (
+    profile: ProfileResponse,
+    previousProfile: ProfileResponse?,
+    distinctId: String,
+  ) -> Unit = { _, _, _ -> },
 ) : ProfileService {
   private val mutex = Mutex()
 
@@ -230,6 +235,8 @@ class DefaultProfileService(
   }
 
   private suspend fun handleProfileUpdate(profile: ProfileResponse, previousProfile: ProfileResponse?) {
+    val distinctId = identityService.getDistinctId()
+
     // Update user properties from server if present.
     val userProps = profile.userProperties
     if (userProps != null) {
@@ -238,12 +245,8 @@ class DefaultProfileService(
       NuxieLogger.info("Updated ${props.size} user properties from server")
     }
 
-    // TODO: segmentService.updateSegments(profile.segments, distinctId)
-    // TODO: journeyService.resumeFromServerState(profile.journeys, profile.campaigns)
-    // TODO: flowService.prefetchFlows(profile.flows) + remove changed/removed flows
-
-    // Suppress unused parameter warning until the above is implemented.
-    previousProfile?.let { _ -> }
+    runCatching { onProfileUpdated(profile, previousProfile, distinctId) }
+      .onFailure { NuxieLogger.warning("Profile update hooks failed: ${it.message}") }
   }
 
   private fun startRefreshTimer() {
@@ -257,4 +260,3 @@ class DefaultProfileService(
     }
   }
 }
-

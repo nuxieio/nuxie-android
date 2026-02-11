@@ -53,6 +53,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -279,6 +281,302 @@ class JourneyServiceTest {
     }
   }
 
+  @Test
+  fun purchaseAction_forwardsCallbackWithJourneyContext() = runBlocking {
+    val purchaseCalls = mutableListOf<PurchaseCall>()
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_purchase",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.Purchase(
+              placementIndex = JsonPrimitive(2),
+              productId = JsonPrimitive("prod_annual"),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      onPurchaseRequested = { journeyId, campaignId, screenId, productId, placementIndex ->
+        purchaseCalls += PurchaseCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          screenId = screenId,
+          productId = productId,
+          placementIndex = placementIndex,
+        )
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_purchase", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "action/press",
+        payload = JsonObject(mapOf("screenId" to JsonPrimitive("screen_1"))),
+        id = null,
+      )
+      delay(80)
+
+      assertEquals(1, purchaseCalls.size)
+      val callback = purchaseCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("screen_1", callback.screenId)
+      assertEquals("prod_annual", callback.productId)
+      assertEquals(2, callback.placementIndex)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun restoreAction_forwardsCallbackWithJourneyContext() = runBlocking {
+    val restoreCalls = mutableListOf<RestoreCall>()
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_restore",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(InteractionAction.Restore),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      onRestoreRequested = { journeyId, campaignId, screenId ->
+        restoreCalls += RestoreCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          screenId = screenId,
+        )
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_restore", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "action/press",
+        payload = JsonObject(mapOf("screenId" to JsonPrimitive("screen_1"))),
+        id = null,
+      )
+      delay(80)
+
+      assertEquals(1, restoreCalls.size)
+      val callback = restoreCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("screen_1", callback.screenId)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun openLinkAction_forwardsCallbackWithJourneyContext() = runBlocking {
+    val openLinkCalls = mutableListOf<OpenLinkCall>()
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_link",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.OpenLink(
+              url = JsonPrimitive("https://nuxie.io/pricing"),
+              target = "_blank",
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      onOpenLinkRequested = { journeyId, campaignId, screenId, url, target ->
+        openLinkCalls += OpenLinkCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          screenId = screenId,
+          url = url,
+          target = target,
+        )
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_link", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "action/press",
+        payload = JsonObject(mapOf("screenId" to JsonPrimitive("screen_1"))),
+        id = null,
+      )
+      delay(80)
+
+      assertEquals(1, openLinkCalls.size)
+      val callback = openLinkCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("screen_1", callback.screenId)
+      assertEquals("https://nuxie.io/pricing", callback.url)
+      assertEquals("_blank", callback.target)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun backAction_forwardsCallbackWithJourneyContext() = runBlocking {
+    val backCalls = mutableListOf<BackCall>()
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      onBackRequested = { journeyId, campaignId, screenId, steps ->
+        backCalls += BackCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          screenId = screenId,
+          steps = steps,
+        )
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_back", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      started.journey.flowState.currentScreenId = "screen_1"
+      started.journey.flowState.navigationStack = mutableListOf("screen_prev")
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "action/back",
+        payload = JsonObject(mapOf("steps" to JsonPrimitive(1))),
+        id = null,
+      )
+      delay(80)
+
+      assertEquals(1, backCalls.size)
+      val callback = backCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("screen_prev", callback.screenId)
+      assertEquals(1, callback.steps)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun runtimeDismiss_forwardsDismissedCallbackWithReasonAndError() = runBlocking {
+    val dismissCalls = mutableListOf<DismissCall>()
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      onDismissed = { journeyId, campaignId, screenId, reason, error ->
+        dismissCalls += DismissCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          screenId = screenId,
+          reason = reason,
+          error = error,
+        )
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_dismiss", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      started.journey.flowState.currentScreenId = "screen_1"
+      harness.service.handleRuntimeDismiss(
+        started.journey.id,
+        CloseReason.Error(IllegalStateException("dismiss_failed")),
+      )
+      delay(80)
+
+      assertEquals(1, dismissCalls.size)
+      val callback = dismissCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("screen_1", callback.screenId)
+      assertEquals("error", callback.reason)
+      assertEquals("dismiss_failed", callback.error)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun resumeFromServerState_restoresPausedJourney() = runBlocking {
+    val harness = newHarness(reentry = CampaignReentry.EveryTime)
+    try {
+      harness.service.initialize()
+
+      harness.service.resumeFromServerState(
+        journeys = listOf(
+          ActiveJourney(
+            sessionId = "srv_journey_1",
+            campaignId = "camp_1",
+            currentNodeId = "screen_server",
+            context = JsonObject(mapOf("server" to JsonPrimitive("state"))),
+          )
+        ),
+        campaigns = harness.campaigns,
+      )
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals("srv_journey_1", active.first().id)
+      assertEquals(JourneyStatus.PAUSED, active.first().status)
+      assertEquals("screen_server", active.first().flowState.currentScreenId)
+      assertEquals("state", active.first().getContext("server")?.jsonPrimitive?.contentOrNull)
+    } finally {
+      harness.close()
+    }
+  }
+
   private data class DelegateCall(
     val journeyId: String,
     val campaignId: String?,
@@ -286,11 +584,49 @@ class JourneyServiceTest {
     val payload: Any?,
   )
 
+  private data class PurchaseCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val screenId: String?,
+    val productId: String,
+    val placementIndex: Any?,
+  )
+
+  private data class RestoreCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val screenId: String?,
+  )
+
+  private data class OpenLinkCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val screenId: String?,
+    val url: String,
+    val target: String?,
+  )
+
+  private data class DismissCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val screenId: String?,
+    val reason: String,
+    val error: String?,
+  )
+
+  private data class BackCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val screenId: String?,
+    val steps: Int,
+  )
+
   private data class Harness(
     val scope: CoroutineScope,
     val service: JourneyService,
     val broker: DefaultTriggerBroker,
     val presented: MutableList<Pair<String, String>>,
+    val campaigns: List<Campaign>,
   ) {
     fun close() {
       scope.cancel()
@@ -301,6 +637,11 @@ class JourneyServiceTest {
     reentry: CampaignReentry,
     interactions: Map<String, List<Interaction>> = emptyMap(),
     onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
+    onPurchaseRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, productId: String, placementIndex: Any?) -> Unit = { _, _, _, _, _ -> },
+    onRestoreRequested: suspend (journeyId: String, campaignId: String?, screenId: String?) -> Unit = { _, _, _ -> },
+    onOpenLinkRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, url: String, target: String?) -> Unit = { _, _, _, _, _ -> },
+    onDismissed: suspend (journeyId: String, campaignId: String?, screenId: String?, reason: String, error: String?) -> Unit = { _, _, _, _, _ -> },
+    onBackRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, steps: Int) -> Unit = { _, _, _, _ -> },
   ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val identity = DefaultIdentityService(InMemoryKeyValueStore())
@@ -400,9 +741,20 @@ class JourneyServiceTest {
         true
       },
       onCallDelegate = onCallDelegate,
+      onPurchaseRequested = onPurchaseRequested,
+      onRestoreRequested = onRestoreRequested,
+      onOpenLinkRequested = onOpenLinkRequested,
+      onDismissed = onDismissed,
+      onBackRequested = onBackRequested,
     )
 
-    return Harness(scope = scope, service = service, broker = broker, presented = presented)
+    return Harness(
+      scope = scope,
+      service = service,
+      broker = broker,
+      presented = presented,
+      campaigns = listOf(campaign),
+    )
   }
 
   private fun buildFlow(interactions: Map<String, List<Interaction>>): RemoteFlow {

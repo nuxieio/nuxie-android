@@ -1,6 +1,7 @@
 package io.nuxie.sdk.config
 
 import io.nuxie.sdk.events.NuxieEvent
+import io.nuxie.sdk.plugins.NuxiePlugin
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
 
 /**
@@ -74,6 +75,15 @@ class NuxieConfiguration(
 
   // Plugins
   var enablePlugins: Boolean = true
+  var plugins: MutableList<NuxiePlugin> = mutableListOf()
+
+  fun addPlugin(plugin: NuxiePlugin) {
+    plugins.add(plugin)
+  }
+
+  fun removePlugin(pluginId: String) {
+    plugins.removeAll { it.pluginId == pluginId }
+  }
 
   // Purchases
   var purchaseDelegate: NuxiePurchaseDelegate? = null

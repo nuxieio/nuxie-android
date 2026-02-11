@@ -25,4 +25,41 @@ interface NuxieDelegate {
     journeyId: String,
     campaignId: String?,
   ) {}
+
+  fun flowPurchaseRequested(
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    productId: String,
+    placementIndex: Any?,
+  ) {}
+
+  fun flowRestoreRequested(
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+  ) {}
+
+  fun flowOpenLinkRequested(
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    url: String,
+    target: String?,
+  ) {}
+
+  fun flowDismissed(
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    reason: String,
+    error: String?,
+  ) {}
+
+  fun flowBackRequested(
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    steps: Int,
+  ) {}
 }

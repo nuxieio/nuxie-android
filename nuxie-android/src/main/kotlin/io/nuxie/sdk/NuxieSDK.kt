@@ -22,6 +22,7 @@ import io.nuxie.sdk.features.FeatureUsageResult
 import io.nuxie.sdk.flows.FlowService
 import io.nuxie.sdk.flows.FlowView
 import io.nuxie.sdk.flows.NuxieFlowActivity
+import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.gating.GatePlan
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.identity.IdentityService
@@ -37,6 +38,10 @@ import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.profile.DefaultProfileService
 import io.nuxie.sdk.profile.FileCachedProfileStore
 import io.nuxie.sdk.profile.ProfileService
+import io.nuxie.sdk.plugins.NuxiePlugin
+import io.nuxie.sdk.plugins.NuxiePluginHost
+import io.nuxie.sdk.plugins.PluginError
+import io.nuxie.sdk.plugins.PluginService
 import io.nuxie.sdk.segments.FileSegmentMembershipStore
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.session.DefaultSessionService
@@ -142,6 +147,7 @@ class NuxieSDK private constructor() {
   private var scope: CoroutineScope? = null
   private var database: NuxieDatabase? = null
   private var activityTracker: CurrentActivityTracker? = null
+  private var pluginService: PluginService? = null
 
   val isSetup: Boolean
     get() {
@@ -180,10 +186,6 @@ class NuxieSDK private constructor() {
 
     val sdkScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     scope = sdkScope
-
-    if (app != null) {
-      activityTracker = CurrentActivityTracker(app)
-    }
 
     val db = Room.databaseBuilder(appContext, NuxieDatabase::class.java, "nuxie-sdk.db")
       .fallbackToDestructiveMigration()
@@ -227,12 +229,20 @@ class NuxieSDK private constructor() {
       directory = File(profileBaseDir, "profiles"),
       ttlMillis = 24L * 60L * 60L * 1000L,
     )
+    var profileUpdateHandler: suspend (
+      profile: io.nuxie.sdk.network.models.ProfileResponse,
+      previousProfile: io.nuxie.sdk.network.models.ProfileResponse?,
+      distinctId: String,
+    ) -> Unit = { _, _, _ -> }
     val profile = DefaultProfileService(
       identityService = requireNotNull(identityService),
       api = api,
       configuration = configuration,
       store = profileStore,
       scope = sdkScope,
+      onProfileUpdated = { nextProfile, previousProfile, distinctId ->
+        profileUpdateHandler(nextProfile, previousProfile, distinctId)
+      },
     )
 
     val info = FeatureInfo()
@@ -314,6 +324,58 @@ class NuxieSDK private constructor() {
           )
         }
       },
+      onPurchaseRequested = { journeyId, campaignId, screenId, productId, placementIndex ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowPurchaseRequested(
+            journeyId = journeyId,
+            campaignId = campaignId,
+            screenId = screenId,
+            productId = productId,
+            placementIndex = placementIndex,
+          )
+        }
+      },
+      onRestoreRequested = { journeyId, campaignId, screenId ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowRestoreRequested(
+            journeyId = journeyId,
+            campaignId = campaignId,
+            screenId = screenId,
+          )
+        }
+      },
+      onOpenLinkRequested = { journeyId, campaignId, screenId, url, target ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowOpenLinkRequested(
+            journeyId = journeyId,
+            campaignId = campaignId,
+            screenId = screenId,
+            url = url,
+            target = target,
+          )
+        }
+      },
+      onDismissed = { journeyId, campaignId, screenId, reason, error ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowDismissed(
+            journeyId = journeyId,
+            campaignId = campaignId,
+            screenId = screenId,
+            reason = reason,
+            error = error,
+          )
+        }
+      },
+      onBackRequested = { journeyId, campaignId, screenId, steps ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowBackRequested(
+            journeyId = journeyId,
+            campaignId = campaignId,
+            screenId = screenId,
+            steps = steps,
+          )
+        }
+      },
     )
 
     // Forward FeatureInfo changes to delegate on the main thread (parity with iOS @MainActor).
@@ -323,22 +385,52 @@ class NuxieSDK private constructor() {
       }
     }
 
-    // Initialize journey runtime + prefetch initial profile and sync features (best-effort).
-    sdkScope.launch {
-      runCatching { journeys.initialize() }
-      val res = runCatching { profile.refetchProfile() }.getOrNull()
-      runCatching { features.syncFeatureInfo() }
-      if (res != null) {
-        runCatching { segments.updateSegments(res.segments, distinctId = requireNotNull(identityService).getDistinctId()) }
-        runCatching {
-          val currentDistinctId = requireNotNull(identityService).getDistinctId()
-          journeys.handleSegmentChange(
-            distinctId = currentDistinctId,
-            segments = res.segments.map { it.id }.toSet(),
-          )
+    suspend fun syncFlows(newFlows: List<RemoteFlow>, previousFlows: List<RemoteFlow>?) {
+      val previous = previousFlows ?: emptyList()
+      if (newFlows.isEmpty() && previous.isEmpty()) return
+
+      val previousById = previous.associateBy { it.id }
+      val nextById = newFlows.associateBy { it.id }
+
+      val flowsToPrefetch = mutableListOf<RemoteFlow>()
+      val flowIdsToRemove = mutableSetOf<String>()
+
+      for (flow in newFlows) {
+        val old = previousById[flow.id]
+        if (old == null) {
+          flowsToPrefetch += flow
+        } else if (old.bundle.manifest.contentHash != flow.bundle.manifest.contentHash) {
+          flowIdsToRemove += flow.id
+          flowsToPrefetch += flow
         }
-        flows.prefetchFlows(res.flows)
       }
+
+      for (old in previous) {
+        if (nextById[old.id] == null) {
+          flowIdsToRemove += old.id
+        }
+      }
+
+      if (flowIdsToRemove.isNotEmpty()) {
+        runCatching { flows.removeFlows(flowIdsToRemove.toList()) }
+      }
+      if (flowsToPrefetch.isNotEmpty()) {
+        flows.prefetchFlows(flowsToPrefetch)
+      }
+    }
+
+    profileUpdateHandler = { nextProfile, previousProfile, distinctId ->
+      if (nextProfile.segments.isNotEmpty()) {
+        runCatching { segments.updateSegments(nextProfile.segments, distinctId = distinctId) }
+        runCatching { journeys.handleSegmentChange(distinctId, nextProfile.segments.map { it.id }.toSet()) }
+      }
+
+      val activeJourneys = nextProfile.journeys.orEmpty()
+      if (activeJourneys.isNotEmpty()) {
+        runCatching { journeys.resumeFromServerState(activeJourneys, campaigns = nextProfile.campaigns) }
+      }
+
+      runCatching { syncFlows(nextProfile.flows, previousProfile?.flows) }
     }
 
     this.api = api
@@ -353,6 +445,75 @@ class NuxieSDK private constructor() {
     this.journeyService = journeys
     this.triggerBroker = broker
     this.irRuntime = runtime
+
+    val plugins = PluginService().also {
+      it.initialize(
+        object : NuxiePluginHost {
+          override fun trigger(
+            event: String,
+            properties: Map<String, Any?>?,
+            userProperties: Map<String, Any?>?,
+            userPropertiesSetOnce: Map<String, Any?>?,
+          ) {
+            this@NuxieSDK.trigger(
+              event = event,
+              properties = properties,
+              userProperties = userProperties,
+              userPropertiesSetOnce = userPropertiesSetOnce,
+              handler = null,
+            )
+          }
+
+          override fun getDistinctId(): String = this@NuxieSDK.getDistinctId()
+          override fun getAnonymousId(): String = this@NuxieSDK.getAnonymousId()
+          override fun isIdentified(): Boolean = this@NuxieSDK.isIdentified
+        }
+      )
+    }
+    if (configuration.enablePlugins) {
+      for (plugin in configuration.plugins) {
+        runCatching {
+          plugins.installPlugin(plugin)
+          plugins.startPlugin(plugin.pluginId)
+        }.onFailure {
+          NuxieLogger.warning("Failed to install/start plugin ${plugin.pluginId}: ${it.message}")
+        }
+      }
+    }
+    pluginService = plugins
+
+    if (app != null) {
+      activityTracker = CurrentActivityTracker(
+        application = app,
+        onAppWillEnterForeground = {
+          sdkScope.launch {
+            pluginService?.onAppWillEnterForeground()
+          }
+        },
+        onAppBecameActive = {
+          requireNotNull(sessionService).onAppBecameActive()
+          sdkScope.launch {
+            runCatching { profile.onAppBecameActive() }
+            runCatching { features.syncFeatureInfo() }
+            runCatching { journeys.checkExpiredTimers() }
+            pluginService?.onAppBecameActive()
+          }
+        },
+        onAppDidEnterBackground = {
+          requireNotNull(sessionService).onAppDidEnterBackground()
+          sdkScope.launch {
+            pluginService?.onAppDidEnterBackground()
+          }
+        },
+      )
+    }
+
+    // Initialize journey runtime + prefetch initial profile and sync features (best-effort).
+    sdkScope.launch {
+      runCatching { journeys.initialize() }
+      runCatching { profile.refetchProfile() }
+      runCatching { features.syncFeatureInfo() }
+    }
 
     NuxieLogger.info("Setup completed with API key: ${NuxieLogger.logApiKey(configuration.apiKey)}")
   }
@@ -675,6 +836,60 @@ class NuxieSDK private constructor() {
   val isIdentified: Boolean
     get() = identityService?.isIdentified == true
 
+  fun startNewSession() {
+    if (!isSetup) return
+    sessionService?.startSession()
+  }
+
+  fun getCurrentSessionId(): String? {
+    if (!isSetup) return null
+    return sessionService?.getSessionId(readOnly = true)
+  }
+
+  fun setSessionId(sessionId: String) {
+    if (!isSetup) return
+    sessionService?.setSessionId(sessionId)
+  }
+
+  fun endSession() {
+    if (!isSetup) return
+    sessionService?.endSession()
+  }
+
+  fun resetSession() {
+    if (!isSetup) return
+    sessionService?.resetSession()
+  }
+
+  @Throws(PluginError::class)
+  fun installPlugin(plugin: NuxiePlugin) {
+    if (!isSetup) throw NuxieError.NotConfigured
+    val service = pluginService ?: throw NuxieError.NotConfigured
+    service.installPlugin(plugin)
+  }
+
+  @Throws(PluginError::class)
+  fun uninstallPlugin(pluginId: String) {
+    if (!isSetup) throw NuxieError.NotConfigured
+    val service = pluginService ?: throw NuxieError.NotConfigured
+    service.uninstallPlugin(pluginId)
+  }
+
+  fun startPlugin(pluginId: String) {
+    if (!isSetup) return
+    pluginService?.startPlugin(pluginId)
+  }
+
+  fun stopPlugin(pluginId: String) {
+    if (!isSetup) return
+    pluginService?.stopPlugin(pluginId)
+  }
+
+  fun isPluginInstalled(pluginId: String): Boolean {
+    if (!isSetup) return false
+    return pluginService?.isPluginInstalled(pluginId) == true
+  }
+
   suspend fun flushEvents(): Boolean = networkQueue?.flush(forceSend = true) ?: false
 
   suspend fun getQueuedEventCount(): Int = eventQueueStore?.size() ?: 0
@@ -692,6 +907,7 @@ class NuxieSDK private constructor() {
     networkQueue?.stop()
     profileService?.shutdown()
     journeyService?.shutdown()
+    pluginService?.cleanup()
     triggerBroker?.reset()
     activityTracker?.stop()
     activityTracker = null
@@ -713,6 +929,7 @@ class NuxieSDK private constructor() {
     journeyService = null
     triggerBroker = null
     irRuntime = null
+    pluginService = null
     delegate = null
     configuration = null
   }
@@ -727,19 +944,8 @@ class NuxieSDK private constructor() {
     if (!isSetup) throw NuxieError.NotConfigured
     val profile = profileService ?: throw NuxieError.NotConfigured
     val features = featureService ?: throw NuxieError.NotConfigured
-    val segments = segmentService
-    val journeys = journeyService
-    val identity = identityService
     val res = profile.refetchProfile()
-    // Profile may contain updated features.
     features.syncFeatureInfo()
-    if (segments != null && identity != null) {
-      runCatching { segments.updateSegments(res.segments, distinctId = identity.getDistinctId()) }
-    }
-    if (journeys != null && identity != null) {
-      runCatching { journeys.handleSegmentChange(identity.getDistinctId(), res.segments.map { it.id }.toSet()) }
-    }
-    flowService?.prefetchFlows(res.flows)
     return res
   }
 

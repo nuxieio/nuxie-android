@@ -22,6 +22,7 @@ import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
 import io.nuxie.sdk.logging.NuxieLogger
+import io.nuxie.sdk.network.models.ActiveJourney
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.triggers.DefaultTriggerBroker
@@ -75,6 +76,38 @@ class JourneyService(
     campaignId: String?,
     message: String,
     payload: Any?,
+  ) -> Unit = { _, _, _, _ -> },
+  private val onPurchaseRequested: suspend (
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    productId: String,
+    placementIndex: Any?,
+  ) -> Unit = { _, _, _, _, _ -> },
+  private val onRestoreRequested: suspend (
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+  ) -> Unit = { _, _, _ -> },
+  private val onOpenLinkRequested: suspend (
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    url: String,
+    target: String?,
+  ) -> Unit = { _, _, _, _, _ -> },
+  private val onDismissed: suspend (
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    reason: String,
+    error: String?,
+  ) -> Unit = { _, _, _, _, _ -> },
+  private val onBackRequested: suspend (
+    journeyId: String,
+    campaignId: String?,
+    screenId: String?,
+    steps: Int,
   ) -> Unit = { _, _, _, _ -> },
 ) {
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
@@ -359,6 +392,13 @@ class JourneyService(
       io.nuxie.sdk.flows.CloseReason.Timeout -> "timeout"
       is io.nuxie.sdk.flows.CloseReason.Error -> "error"
     }
+    val callbackReason = when (reason) {
+      io.nuxie.sdk.flows.CloseReason.UserDismissed -> "user_dismissed"
+      io.nuxie.sdk.flows.CloseReason.PurchaseCompleted -> "purchase_completed"
+      io.nuxie.sdk.flows.CloseReason.Timeout -> "timeout"
+      is io.nuxie.sdk.flows.CloseReason.Error -> "error"
+    }
+    val callbackError = (reason as? io.nuxie.sdk.flows.CloseReason.Error)?.throwable?.message
 
     val props = mutableMapOf<String, Any?>(
       "method" to method,
@@ -376,18 +416,131 @@ class JourneyService(
 
     val outcome = runner.dispatchEventTrigger(event)
     handleOutcome(outcome, journey)
+    dispatchDismissedCallback(
+      journeyId = journeyId,
+      reason = callbackReason,
+      error = callbackError,
+    )
 
     if (!runner.hasPendingWork()) {
       completeJourney(journey, JourneyExitReason.COMPLETED)
     }
   }
 
+  suspend fun resumeFromServerState(journeys: List<ActiveJourney>, campaigns: List<Campaign>) {
+    for (active in journeys) {
+      val existing = inMemoryJourneysById[active.sessionId]
+      if (existing != null) {
+        existing.setContext("_server_resume", true, nowEpochMillis = nowEpochMillis())
+        persistJourney(existing)
+        continue
+      }
+
+      val campaign = campaigns.firstOrNull { it.id == active.campaignId }
+      if (campaign == null) {
+        NuxieLogger.warning("Campaign ${active.campaignId} not found for server journey ${active.sessionId}")
+        continue
+      }
+
+      val journey = Journey(
+        campaign = campaign,
+        distinctId = identityService.getDistinctId(),
+        id = active.sessionId,
+        nowEpochMillis = nowEpochMillis(),
+      )
+      journey.status = JourneyStatus.PAUSED
+      journey.flowState.currentScreenId = active.currentNodeId
+      journey.context = active.context.toMutableMap()
+
+      inMemoryJourneysById[journey.id] = journey
+      persistJourney(journey)
+
+      val resumeAt = journey.flowState.pendingAction?.resumeAtEpochMillis
+      if (resumeAt != null) {
+        scheduleResume(journey.id, resumeAt)
+      }
+    }
+  }
+
   suspend fun dispatchDelegateCallback(journeyId: String, message: String, payload: Any?) {
-    val campaignId = inMemoryJourneysById[journeyId]?.campaignId
+    val journey = inMemoryJourneysById[journeyId]
+    val campaignId = journey?.campaignId
     runCatching {
       onCallDelegate(journeyId, campaignId, message, payload)
     }.onFailure { error ->
       NuxieLogger.warning("JourneyService: call_delegate callback failed for journey=$journeyId: ${error.message}")
+    }
+  }
+
+  suspend fun dispatchPurchaseRequested(journeyId: String, productId: String, placementIndex: Any?) {
+    val journey = inMemoryJourneysById[journeyId]
+    runCatching {
+      onPurchaseRequested(
+        journeyId,
+        journey?.campaignId,
+        journey?.flowState?.currentScreenId,
+        productId,
+        placementIndex,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning("JourneyService: purchase callback failed for journey=$journeyId: ${error.message}")
+    }
+  }
+
+  suspend fun dispatchRestoreRequested(journeyId: String) {
+    val journey = inMemoryJourneysById[journeyId]
+    runCatching {
+      onRestoreRequested(
+        journeyId,
+        journey?.campaignId,
+        journey?.flowState?.currentScreenId,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning("JourneyService: restore callback failed for journey=$journeyId: ${error.message}")
+    }
+  }
+
+  suspend fun dispatchOpenLinkRequested(journeyId: String, url: String, target: String?) {
+    val journey = inMemoryJourneysById[journeyId]
+    runCatching {
+      onOpenLinkRequested(
+        journeyId,
+        journey?.campaignId,
+        journey?.flowState?.currentScreenId,
+        url,
+        target,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning("JourneyService: open_link callback failed for journey=$journeyId: ${error.message}")
+    }
+  }
+
+  suspend fun dispatchBackRequested(journeyId: String, steps: Int) {
+    val journey = inMemoryJourneysById[journeyId]
+    runCatching {
+      onBackRequested(
+        journeyId,
+        journey?.campaignId,
+        journey?.flowState?.currentScreenId,
+        steps,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning("JourneyService: back callback failed for journey=$journeyId: ${error.message}")
+    }
+  }
+
+  suspend fun dispatchDismissedCallback(journeyId: String, reason: String, error: String?) {
+    val journey = inMemoryJourneysById[journeyId]
+    runCatching {
+      onDismissed(
+        journeyId,
+        journey?.campaignId,
+        journey?.flowState?.currentScreenId,
+        reason,
+        error,
+      )
+    }.onFailure { err ->
+      NuxieLogger.warning("JourneyService: dismiss callback failed for journey=$journeyId: ${err.message}")
     }
   }
 
@@ -876,14 +1029,17 @@ private class FlowRuntimeDelegateAdapter(
   }
 
   override suspend fun performPurchase(productId: String, placementIndex: Any?) {
+    journeyService.dispatchPurchaseRequested(journeyId, productId, placementIndex)
     flowView?.performPurchase(productId)
   }
 
   override suspend fun performRestore() {
+    journeyService.dispatchRestoreRequested(journeyId)
     flowView?.performRestore()
   }
 
   override suspend fun performOpenLink(url: String, target: String?) {
+    journeyService.dispatchOpenLinkRequested(journeyId, url, target)
     flowView?.performOpenLink(url, target)
   }
 
@@ -892,7 +1048,7 @@ private class FlowRuntimeDelegateAdapter(
   }
 
   override suspend fun performBack(steps: Int?, transition: JsonElement?) {
-    // Back is currently represented through runtime navigation stack updates.
+    journeyService.dispatchBackRequested(journeyId, steps ?: 1)
   }
 
   override suspend fun callDelegate(message: String, payload: Any?) {

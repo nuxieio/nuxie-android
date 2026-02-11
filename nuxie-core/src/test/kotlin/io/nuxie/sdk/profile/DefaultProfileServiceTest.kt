@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -226,6 +227,118 @@ class DefaultProfileServiceTest {
     assertNull(identity.userProperty("role"))
     service.refetchProfile()
     assertEquals("admin", identity.userProperty("role")?.toString()?.trim('"'))
+    service.shutdown()
+  }
+
+  @Test
+  fun refetch_profile_invokes_onProfileUpdated_hook_with_previousProfile() = runTest {
+    val clock = FakeClock(now = 1_000_000L)
+    val store = InMemoryCachedProfileStore()
+    val distinctId = "user_1"
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId(distinctId) }
+
+    val callbacks = mutableListOf<Triple<ProfileResponse, ProfileResponse?, String>>()
+    var fetchCount = 0
+    val api = FakeApi {
+      fetchCount += 1
+      when (fetchCount) {
+        1 -> ProfileResponse(
+          campaigns = emptyList(),
+          segments = emptyList(),
+          flows = emptyList(),
+          userProperties = buildJsonObject { put("stage", JsonPrimitive("first")) },
+        )
+
+        else -> ProfileResponse(
+          campaigns = emptyList(),
+          segments = emptyList(),
+          flows = emptyList(),
+          userProperties = buildJsonObject { put("stage", JsonPrimitive("second")) },
+        )
+      }
+    }
+    val config = NuxieConfiguration(apiKey = "k")
+
+    val service = DefaultProfileService(
+      identityService = identity,
+      api = api,
+      configuration = config,
+      store = store,
+      scope = this,
+      clock = clock,
+      onProfileUpdated = { profile, previous, callbackDistinctId ->
+        callbacks += Triple(profile, previous, callbackDistinctId)
+      },
+    )
+
+    service.refetchProfile()
+    service.refetchProfile()
+
+    assertEquals(2, callbacks.size)
+    assertEquals("first", callbacks[0].first.userProperties?.get("stage")?.toString()?.trim('"'))
+    assertNull(callbacks[0].second)
+    assertEquals(distinctId, callbacks[0].third)
+
+    assertEquals("second", callbacks[1].first.userProperties?.get("stage")?.toString()?.trim('"'))
+    assertNotNull(callbacks[1].second)
+    assertEquals("first", callbacks[1].second?.userProperties?.get("stage")?.toString()?.trim('"'))
+    assertEquals(distinctId, callbacks[1].third)
+    service.shutdown()
+  }
+
+  @Test
+  fun stale_fetch_background_refresh_invokes_onProfileUpdated_hook() = runTest {
+    val clock = FakeClock(now = 1_000_000L)
+    val store = InMemoryCachedProfileStore()
+    val distinctId = "user_1"
+
+    val staleResponse = ProfileResponse(
+      campaigns = emptyList(),
+      segments = emptyList(),
+      flows = emptyList(),
+      userProperties = buildJsonObject { put("k", JsonPrimitive("stale")) },
+    )
+    store.store(
+      CachedProfile(
+        response = staleResponse,
+        distinctId = distinctId,
+        cachedAtEpochMillis = clock.nowEpochMillis() - (10L * 60L * 1000L),
+      ),
+      forKey = distinctId,
+    )
+
+    val freshResponse = ProfileResponse(
+      campaigns = emptyList(),
+      segments = emptyList(),
+      flows = emptyList(),
+      userProperties = buildJsonObject { put("k", JsonPrimitive("fresh")) },
+    )
+    val callbacks = mutableListOf<Pair<ProfileResponse, ProfileResponse?>>()
+
+    val identity = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId(distinctId) }
+    val api = FakeApi { freshResponse }
+    val config = NuxieConfiguration(apiKey = "k")
+
+    val service = DefaultProfileService(
+      identityService = identity,
+      api = api,
+      configuration = config,
+      store = store,
+      scope = this,
+      clock = clock,
+      onProfileUpdated = { profile, previous, _ ->
+        callbacks += profile to previous
+      },
+    )
+
+    val immediate = service.fetchProfile(distinctId)
+    assertEquals("stale", immediate.userProperties?.get("k")?.toString()?.trim('"'))
+
+    testScheduler.runCurrent()
+
+    assertEquals(1, callbacks.size)
+    assertEquals("fresh", callbacks.first().first.userProperties?.get("k")?.toString()?.trim('"'))
+    assertEquals("stale", callbacks.first().second?.userProperties?.get("k")?.toString()?.trim('"'))
     service.shutdown()
   }
 }
