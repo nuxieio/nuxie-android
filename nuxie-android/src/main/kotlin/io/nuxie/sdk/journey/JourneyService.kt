@@ -70,6 +70,12 @@ class JourneyService(
   private val irRuntime: IRRuntime = IRRuntime(),
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
   private val presentFlow: suspend (flowId: String, journeyId: String) -> Boolean,
+  private val onCallDelegate: suspend (
+    journeyId: String,
+    campaignId: String?,
+    message: String,
+    payload: Any?,
+  ) -> Unit = { _, _, _, _ -> },
 ) {
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
   private val flowRunners: MutableMap<String, FlowJourneyRunner> = mutableMapOf()
@@ -373,6 +379,15 @@ class JourneyService(
 
     if (!runner.hasPendingWork()) {
       completeJourney(journey, JourneyExitReason.COMPLETED)
+    }
+  }
+
+  suspend fun dispatchDelegateCallback(journeyId: String, message: String, payload: Any?) {
+    val campaignId = inMemoryJourneysById[journeyId]?.campaignId
+    runCatching {
+      onCallDelegate(journeyId, campaignId, message, payload)
+    }.onFailure { error ->
+      NuxieLogger.warning("JourneyService: call_delegate callback failed for journey=$journeyId: ${error.message}")
     }
   }
 
@@ -881,7 +896,11 @@ private class FlowRuntimeDelegateAdapter(
   }
 
   override suspend fun callDelegate(message: String, payload: Any?) {
-    // Delegate callbacks will be wired in SDK surface in a follow-up patch.
+    journeyService.dispatchDelegateCallback(
+      journeyId = journeyId,
+      message = message,
+      payload = payload,
+    )
   }
 }
 

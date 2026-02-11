@@ -304,6 +304,16 @@ class NuxieSDK private constructor() {
       triggerBroker = broker,
       irRuntime = runtime,
       presentFlow = ::presentFlowForJourney,
+      onCallDelegate = { journeyId, campaignId, message, payload ->
+        withContext(Dispatchers.Main) {
+          delegate?.flowDelegateCalled(
+            message = message,
+            payload = payload,
+            journeyId = journeyId,
+            campaignId = campaignId,
+          )
+        }
+      },
     )
 
     // Forward FeatureInfo changes to delegate on the main thread (parity with iOS @MainActor).

@@ -20,6 +20,9 @@ import io.nuxie.sdk.flows.BuildManifestFile
 import io.nuxie.sdk.flows.CloseReason
 import io.nuxie.sdk.flows.FlowBundleRef
 import io.nuxie.sdk.flows.FlowService
+import io.nuxie.sdk.flows.Interaction
+import io.nuxie.sdk.flows.InteractionAction
+import io.nuxie.sdk.flows.InteractionTrigger
 import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.flows.RemoteFlowScreen
 import io.nuxie.sdk.flows.ViewModel
@@ -211,6 +214,78 @@ class JourneyServiceTest {
     }
   }
 
+  @Test
+  fun callDelegateAction_forwardsCallbackWithJourneyContext() = runBlocking {
+    val delegateCalls = mutableListOf<DelegateCall>()
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_1",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.CallDelegate(
+              message = "e2e_delegate",
+              payload = JsonObject(mapOf("k" to JsonPrimitive("v"))),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      onCallDelegate = { journeyId, campaignId, message, payload ->
+        delegateCalls += DelegateCall(
+          journeyId = journeyId,
+          campaignId = campaignId,
+          message = message,
+          payload = payload,
+        )
+      },
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "action/press",
+        payload = JsonObject(mapOf("screenId" to JsonPrimitive("screen_1"))),
+        id = null,
+      )
+      delay(80)
+
+      assertEquals(1, delegateCalls.size)
+      val callback = delegateCalls.first()
+      assertEquals(started.journey.id, callback.journeyId)
+      assertEquals("camp_1", callback.campaignId)
+      assertEquals("e2e_delegate", callback.message)
+
+      val payload = callback.payload as? Map<*, *>
+      assertNotNull(payload)
+      assertEquals("v", payload?.get("k"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  private data class DelegateCall(
+    val journeyId: String,
+    val campaignId: String?,
+    val message: String,
+    val payload: Any?,
+  )
+
   private data class Harness(
     val scope: CoroutineScope,
     val service: JourneyService,
@@ -222,7 +297,11 @@ class JourneyServiceTest {
     }
   }
 
-  private fun newHarness(reentry: CampaignReentry): Harness {
+  private fun newHarness(
+    reentry: CampaignReentry,
+    interactions: Map<String, List<Interaction>> = emptyMap(),
+    onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
+  ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val identity = DefaultIdentityService(InMemoryKeyValueStore())
     identity.setDistinctId("user_1")
@@ -242,7 +321,7 @@ class JourneyServiceTest {
       campaignType = null,
     )
 
-    val remoteFlow = buildFlow()
+    val remoteFlow = buildFlow(interactions)
     val profile = ProfileResponse(
       campaigns = listOf(campaign),
       segments = emptyList(),
@@ -320,12 +399,13 @@ class JourneyServiceTest {
         presented += flowId to journeyId
         true
       },
+      onCallDelegate = onCallDelegate,
     )
 
     return Harness(scope = scope, service = service, broker = broker, presented = presented)
   }
 
-  private fun buildFlow(): RemoteFlow {
+  private fun buildFlow(interactions: Map<String, List<Interaction>>): RemoteFlow {
     val vm = ViewModel(
       id = "vm_main",
       name = "vm_main",
@@ -360,7 +440,7 @@ class JourneyServiceTest {
       screens = listOf(
         RemoteFlowScreen(id = "screen_1", defaultViewModelId = "vm_main", defaultInstanceId = "vm_inst_1"),
       ),
-      interactions = emptyMap(),
+      interactions = interactions,
       viewModels = listOf(vm),
       viewModelInstances = listOf(
         ViewModelInstance(
@@ -374,4 +454,3 @@ class JourneyServiceTest {
     )
   }
 }
-
