@@ -3,6 +3,7 @@ package io.nuxie.sdk.events
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
+import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.network.NuxieApi
 import io.nuxie.sdk.session.DefaultSessionService
@@ -45,6 +46,7 @@ class EventServiceTest {
       configuration = config,
       api = api,
       store = store,
+      historyStore = InMemoryEventHistoryStore(),
       networkQueue = queue,
       scope = this,
     )

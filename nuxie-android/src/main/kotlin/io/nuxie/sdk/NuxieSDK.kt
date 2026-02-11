@@ -36,6 +36,7 @@ import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.session.DefaultSessionService
 import io.nuxie.sdk.session.SessionService
 import io.nuxie.sdk.storage.KeyValueStore
+import io.nuxie.sdk.storage.RoomEventHistoryStore
 import io.nuxie.sdk.storage.RoomEventQueueStore
 import io.nuxie.sdk.storage.SharedPreferencesKeyValueStore
 import io.nuxie.sdk.storage.db.NuxieDatabase
@@ -170,6 +171,7 @@ class NuxieSDK private constructor() {
     )
 
     val store = RoomEventQueueStore(db.eventQueueDao())
+    val historyStore = RoomEventHistoryStore(db.eventHistoryDao())
     val queue = NuxieNetworkQueue(
       store = store,
       api = api,
@@ -189,6 +191,7 @@ class NuxieSDK private constructor() {
       configuration = configuration,
       api = api,
       store = store,
+      historyStore = historyStore,
       networkQueue = queue,
       scope = sdkScope,
     )

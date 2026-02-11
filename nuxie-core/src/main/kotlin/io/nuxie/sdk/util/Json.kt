@@ -36,7 +36,7 @@ fun toJsonObject(value: Map<String, Any?>): JsonObject {
   return JsonObject(value.mapValues { (_, v) -> toJsonElement(v) })
 }
 
-internal fun fromJsonElement(value: JsonElement): Any? {
+fun fromJsonElement(value: JsonElement): Any? {
   return when (value) {
     JsonNull -> null
     is JsonPrimitive -> {

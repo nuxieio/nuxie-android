@@ -3,6 +3,7 @@ package io.nuxie.sdk.events
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
+import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.features.FeatureCheckResult
 import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.identity.DefaultIdentityService
@@ -96,6 +97,7 @@ class EventServiceTrackForTriggerTest {
       configuration = config,
       api = api,
       store = store,
+      historyStore = InMemoryEventHistoryStore(),
       networkQueue = queue,
       scope = this,
     )
@@ -119,4 +121,3 @@ class EventServiceTrackForTriggerTest {
     assertNotNull(capturedProps!!["\$set_once"])
   }
 }
-
