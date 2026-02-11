@@ -1,8 +1,10 @@
 package io.nuxie.sdk.network.models
 
+import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.features.Feature
 import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.gating.GatePlan
+import io.nuxie.sdk.segments.Segment
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -28,8 +30,8 @@ data class BatchError(
 
 @Serializable
 data class ProfileResponse(
-  val campaigns: List<JsonElement> = emptyList(),
-  val segments: List<JsonElement> = emptyList(),
+  val campaigns: List<Campaign> = emptyList(),
+  val segments: List<Segment> = emptyList(),
   val flows: List<RemoteFlow> = emptyList(),
   val userProperties: JsonObject? = null,
   val experiments: Map<String, ExperimentAssignment>? = null,
