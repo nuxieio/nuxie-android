@@ -24,3 +24,4 @@ rootProject.name = "nuxie-android"
 
 include(":nuxie-core")
 include(":nuxie-android")
+include(":example-app")
