@@ -1,6 +1,11 @@
 package io.nuxie.sdk
 
+import android.app.Activity
+import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import androidx.room.Room
 import io.nuxie.sdk.config.EventLinkingPolicy
 import io.nuxie.sdk.config.NuxieConfiguration
@@ -14,8 +19,12 @@ import io.nuxie.sdk.features.FeatureCheckResult
 import io.nuxie.sdk.features.FeatureInfo
 import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.features.FeatureUsageResult
+import io.nuxie.sdk.flows.FlowService
+import io.nuxie.sdk.flows.FlowView
+import io.nuxie.sdk.flows.NuxieFlowActivity
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.identity.IdentityService
+import io.nuxie.sdk.lifecycle.CurrentActivityTracker
 import io.nuxie.sdk.logging.NuxieLogSink
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.network.NuxieApi
@@ -88,8 +97,12 @@ class NuxieSDK private constructor() {
   internal var featureService: FeatureService? = null
     private set
 
+  internal var flowService: FlowService? = null
+    private set
+
   private var scope: CoroutineScope? = null
   private var database: NuxieDatabase? = null
+  private var activityTracker: CurrentActivityTracker? = null
 
   val isSetup: Boolean
     get() {
@@ -121,12 +134,17 @@ class NuxieSDK private constructor() {
     NuxieLogger.setSink(AndroidLogcatSink())
 
     val appContext = context.applicationContext
+    val app = appContext as? Application
     val kv: KeyValueStore = SharedPreferencesKeyValueStore(appContext)
     identityService = DefaultIdentityService(kv)
     sessionService = DefaultSessionService()
 
     val sdkScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     scope = sdkScope
+
+    if (app != null) {
+      activityTracker = CurrentActivityTracker(app)
+    }
 
     val db = Room.databaseBuilder(appContext, NuxieDatabase::class.java, "nuxie-sdk.db")
       .fallbackToDestructiveMigration()
@@ -184,6 +202,14 @@ class NuxieSDK private constructor() {
       featureInfo = info,
     )
 
+    val flowCacheBaseDir = configuration.customStoragePath?.let { File(it) } ?: appContext.cacheDir
+    val flows = FlowService(
+      api = api,
+      configuration = configuration,
+      scope = sdkScope,
+      cacheDirectory = flowCacheBaseDir,
+    )
+
     // Forward FeatureInfo changes to delegate on the main thread (parity with iOS @MainActor).
     info.onFeatureChange = { featureId, oldValue, newValue ->
       sdkScope.launch(Dispatchers.Main) {
@@ -193,8 +219,11 @@ class NuxieSDK private constructor() {
 
     // Prefetch initial profile and sync features (best-effort).
     sdkScope.launch {
-      runCatching { profile.refetchProfile() }
+      val res = runCatching { profile.refetchProfile() }.getOrNull()
       runCatching { features.syncFeatureInfo() }
+      if (res != null) {
+        flows.prefetchFlows(res.flows)
+      }
     }
 
     this.api = api
@@ -204,6 +233,7 @@ class NuxieSDK private constructor() {
     this.profileService = profile
     this.featureInfo = info
     this.featureService = features
+    this.flowService = flows
 
     NuxieLogger.info("Setup completed with API key: ${NuxieLogger.logApiKey(configuration.apiKey)}")
   }
@@ -275,6 +305,7 @@ class NuxieSDK private constructor() {
       profileService?.clearCache(prevDistinctId)
       profileService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
       featureService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
+      flowService?.clearCache()
     }
   }
 
@@ -301,6 +332,8 @@ class NuxieSDK private constructor() {
     // Best-effort cleanup.
     networkQueue?.stop()
     profileService?.shutdown()
+    activityTracker?.stop()
+    activityTracker = null
     scope?.cancel()
     database?.close()
     database = null
@@ -314,6 +347,7 @@ class NuxieSDK private constructor() {
     featureService = null
     featureInfo = null
     profileService = null
+    flowService = null
     delegate = null
     configuration = null
   }
@@ -331,7 +365,34 @@ class NuxieSDK private constructor() {
     val res = profile.refetchProfile()
     // Profile may contain updated features.
     features.syncFeatureInfo()
+    flowService?.prefetchFlows(res.flows)
     return res
+  }
+
+  fun showFlow(flowId: String) {
+    if (!isSetup) {
+      NuxieLogger.warning("showFlow called before SDK setup")
+      return
+    }
+    val activity = activityTracker?.getCurrentActivity()
+    if (activity == null) {
+      NuxieLogger.warning("showFlow requires a foreground Activity")
+      return
+    }
+    val intent = Intent(activity, NuxieFlowActivity::class.java)
+      .putExtra(NuxieFlowActivity.EXTRA_FLOW_ID, flowId)
+
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      activity.startActivity(intent)
+    } else {
+      Handler(Looper.getMainLooper()).post { activity.startActivity(intent) }
+    }
+  }
+
+  suspend fun getFlowView(activity: Activity, flowId: String): FlowView {
+    if (!isSetup) throw NuxieError.NotConfigured
+    val svc = flowService ?: throw NuxieError.NotConfigured
+    return svc.getFlowView(activity, flowId, runtimeDelegate = null)
   }
 
   suspend fun hasFeature(featureId: String): FeatureAccess {

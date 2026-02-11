@@ -1,1 +1,9 @@
-<manifest />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <activity
+      android:name="io.nuxie.sdk.flows.NuxieFlowActivity"
+      android:exported="false"
+      android:theme="@style/Nuxie.Flow.ActivityTheme"
+      android:configChanges="orientation|screenSize|keyboardHidden" />
+  </application>
+</manifest>
