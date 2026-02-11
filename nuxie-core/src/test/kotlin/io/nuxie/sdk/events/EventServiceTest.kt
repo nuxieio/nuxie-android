@@ -43,6 +43,7 @@ class EventServiceTest {
       identityService = identity,
       sessionService = session,
       configuration = config,
+      api = api,
       store = store,
       networkQueue = queue,
       scope = this,

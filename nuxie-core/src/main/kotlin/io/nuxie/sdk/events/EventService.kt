@@ -6,6 +6,8 @@ import io.nuxie.sdk.events.queue.NuxieNetworkQueue
 import io.nuxie.sdk.events.queue.QueuedEvent
 import io.nuxie.sdk.identity.IdentityService
 import io.nuxie.sdk.logging.NuxieLogger
+import io.nuxie.sdk.network.NuxieApiProtocol
+import io.nuxie.sdk.network.models.EventResponse
 import io.nuxie.sdk.session.SessionService
 import io.nuxie.sdk.util.toJsonObject
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +18,7 @@ class EventService(
   private val identityService: IdentityService,
   private val sessionService: SessionService,
   private val configuration: NuxieConfiguration,
+  private val api: NuxieApiProtocol,
   private val store: EventQueueStore,
   private val networkQueue: NuxieNetworkQueue,
   private val scope: CoroutineScope,
@@ -103,5 +106,84 @@ class EventService(
    */
   suspend fun reassignEvents(fromDistinctId: String, toDistinctId: String): Int {
     return store.reassignDistinctId(fromDistinctId = fromDistinctId, toDistinctId = toDistinctId)
+  }
+
+  /**
+   * Track an event synchronously and return the enriched event plus server response.
+   *
+   * Mirrors iOS `EventService.trackForTrigger(...)`:
+   * - flushes pending batch queue first (best-effort)
+   * - calls `POST /event` directly
+   *
+   * Note: Android does not yet persist a separate event history store, so this currently
+   * does not record a local history copy.
+   */
+  suspend fun trackForTrigger(
+    event: String,
+    properties: Map<String, Any?>? = null,
+    userProperties: Map<String, Any?>? = null,
+    userPropertiesSetOnce: Map<String, Any?>? = null,
+  ): Pair<NuxieEvent, EventResponse> {
+    if (event.isBlank()) {
+      throw IllegalArgumentException("Event name cannot be empty")
+    }
+
+    // Ensure any queued events are delivered first so the trigger call observes a consistent order.
+    runCatching { networkQueue.flush(forceSend = true) }
+
+    val distinctId = identityService.getDistinctId()
+
+    val mergedProps = buildMap<String, Any?> {
+      putAll(properties ?: emptyMap())
+      if (userProperties != null) put("\$set", userProperties)
+      if (userPropertiesSetOnce != null) put("\$set_once", userPropertiesSetOnce)
+
+      if (!containsKey("\$session_id")) {
+        val sessionId = sessionService.getSessionId(readOnly = false)
+        if (sessionId != null) {
+          put("\$session_id", sessionId)
+          sessionService.touchSession()
+        }
+      }
+    }.let { props ->
+      configuration.propertiesSanitizer?.sanitize(props) ?: props
+    }
+
+    val nuxieEvent = NuxieEvent(
+      name = event,
+      distinctId = distinctId,
+      properties = mergedProps,
+    )
+
+    val finalEvent = if (configuration.beforeSend != null) {
+      configuration.beforeSend?.invoke(nuxieEvent) ?: throw IllegalStateException("Event dropped by beforeSend")
+    } else {
+      nuxieEvent
+    }
+
+    val propsJson: JsonObject = toJsonObject(finalEvent.properties)
+    val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)
+
+    val response = api.trackEvent(
+      event = finalEvent.name,
+      distinctId = finalEvent.distinctId,
+      anonDistinctId = anonDistinctId,
+      properties = propsJson,
+      uuid = finalEvent.id,
+      value = finalEvent.properties["value"] as? Double,
+      entityId = finalEvent.properties["entityId"] as? String,
+      timestamp = finalEvent.timestamp,
+    )
+
+    val eventId = response.event?.id ?: finalEvent.id
+    val enriched = NuxieEvent(
+      id = eventId,
+      name = finalEvent.name,
+      distinctId = finalEvent.distinctId,
+      properties = finalEvent.properties,
+      timestamp = finalEvent.timestamp,
+    )
+
+    return enriched to response
   }
 }
