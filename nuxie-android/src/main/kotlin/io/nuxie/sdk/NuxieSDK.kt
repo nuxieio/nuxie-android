@@ -25,6 +25,10 @@ import io.nuxie.sdk.flows.NuxieFlowActivity
 import io.nuxie.sdk.gating.GatePlan
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.identity.IdentityService
+import io.nuxie.sdk.ir.IRRuntime
+import io.nuxie.sdk.journey.FileJourneyStore
+import io.nuxie.sdk.journey.JourneyService
+import io.nuxie.sdk.journey.JourneyTriggerResult
 import io.nuxie.sdk.lifecycle.CurrentActivityTracker
 import io.nuxie.sdk.logging.NuxieLogSink
 import io.nuxie.sdk.logging.NuxieLogger
@@ -33,6 +37,8 @@ import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.profile.DefaultProfileService
 import io.nuxie.sdk.profile.FileCachedProfileStore
 import io.nuxie.sdk.profile.ProfileService
+import io.nuxie.sdk.segments.FileSegmentMembershipStore
+import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.session.DefaultSessionService
 import io.nuxie.sdk.session.SessionService
 import io.nuxie.sdk.storage.KeyValueStore
@@ -43,11 +49,13 @@ import io.nuxie.sdk.storage.db.NuxieDatabase
 import io.nuxie.sdk.util.Iso8601
 import io.nuxie.sdk.util.UuidV7
 import io.nuxie.sdk.util.toJsonObject
+import io.nuxie.sdk.triggers.DefaultTriggerBroker
 import io.nuxie.sdk.triggers.EntitlementUpdate
 import io.nuxie.sdk.triggers.GateSource
 import io.nuxie.sdk.triggers.JourneyRef
 import io.nuxie.sdk.triggers.TriggerDecision
 import io.nuxie.sdk.triggers.TriggerError
+import io.nuxie.sdk.triggers.TriggerBroker
 import io.nuxie.sdk.triggers.TriggerHandle
 import io.nuxie.sdk.triggers.TriggerUpdate
 import kotlinx.coroutines.CoroutineScope
@@ -67,6 +75,12 @@ import java.io.File
  * This will evolve to match the iOS SDK surface area.
  */
 class NuxieSDK private constructor() {
+  private enum class TriggerMode {
+    IMMEDIATE,
+    FLOW,
+    REQUIRE_FEATURE,
+  }
+
   companion object {
     @Volatile private var instance: NuxieSDK? = null
 
@@ -111,6 +125,18 @@ class NuxieSDK private constructor() {
     private set
 
   internal var flowService: FlowService? = null
+    private set
+
+  internal var segmentService: SegmentService? = null
+    private set
+
+  internal var journeyService: JourneyService? = null
+    private set
+
+  internal var triggerBroker: TriggerBroker? = null
+    private set
+
+  internal var irRuntime: IRRuntime? = null
     private set
 
   private var scope: CoroutineScope? = null
@@ -226,6 +252,60 @@ class NuxieSDK private constructor() {
       cacheDirectory = flowCacheBaseDir,
     )
 
+    val runtime = IRRuntime()
+    val segmentStore = FileSegmentMembershipStore(directory = File(profileBaseDir, "segments"))
+    val segments = SegmentService(
+      identityService = requireNotNull(identityService),
+      events = events,
+      irRuntime = runtime,
+      featureQueriesProvider = {
+        object : io.nuxie.sdk.ir.IRFeatureQueries {
+          override suspend fun has(featureId: String): Boolean {
+            return features.getCached(featureId, null)?.allowed == true
+          }
+
+          override suspend fun isUnlimited(featureId: String): Boolean {
+            return features.getCached(featureId, null)?.unlimited == true
+          }
+
+          override suspend fun getBalance(featureId: String): Int? {
+            return features.getCached(featureId, null)?.balance
+          }
+        }
+      },
+      membershipStore = segmentStore,
+      scope = sdkScope,
+      enableMonitoring = true,
+    )
+
+    val broker = DefaultTriggerBroker()
+
+    suspend fun presentFlowForJourney(flowId: String, journeyId: String): Boolean {
+      val activity = activityTracker?.getCurrentActivity() ?: return false
+      val intent = Intent(activity, NuxieFlowActivity::class.java)
+        .putExtra(NuxieFlowActivity.EXTRA_FLOW_ID, flowId)
+        .putExtra(NuxieFlowActivity.EXTRA_JOURNEY_ID, journeyId)
+      return runCatching {
+        withContext(Dispatchers.Main) { activity.startActivity(intent) }
+        true
+      }.getOrDefault(false)
+    }
+
+    val journeys = JourneyService(
+      scope = sdkScope,
+      configuration = configuration,
+      identityService = requireNotNull(identityService),
+      eventService = events,
+      profileService = profile,
+      segmentService = segments,
+      featureService = features,
+      flowService = flows,
+      journeyStore = FileJourneyStore(File(profileBaseDir, "journeys")),
+      triggerBroker = broker,
+      irRuntime = runtime,
+      presentFlow = ::presentFlowForJourney,
+    )
+
     // Forward FeatureInfo changes to delegate on the main thread (parity with iOS @MainActor).
     info.onFeatureChange = { featureId, oldValue, newValue ->
       sdkScope.launch(Dispatchers.Main) {
@@ -233,11 +313,20 @@ class NuxieSDK private constructor() {
       }
     }
 
-    // Prefetch initial profile and sync features (best-effort).
+    // Initialize journey runtime + prefetch initial profile and sync features (best-effort).
     sdkScope.launch {
+      runCatching { journeys.initialize() }
       val res = runCatching { profile.refetchProfile() }.getOrNull()
       runCatching { features.syncFeatureInfo() }
       if (res != null) {
+        runCatching { segments.updateSegments(res.segments, distinctId = requireNotNull(identityService).getDistinctId()) }
+        runCatching {
+          val currentDistinctId = requireNotNull(identityService).getDistinctId()
+          journeys.handleSegmentChange(
+            distinctId = currentDistinctId,
+            segments = res.segments.map { it.id }.toSet(),
+          )
+        }
         flows.prefetchFlows(res.flows)
       }
     }
@@ -250,15 +339,16 @@ class NuxieSDK private constructor() {
     this.featureInfo = info
     this.featureService = features
     this.flowService = flows
+    this.segmentService = segments
+    this.journeyService = journeys
+    this.triggerBroker = broker
+    this.irRuntime = runtime
 
     NuxieLogger.info("Setup completed with API key: ${NuxieLogger.logApiKey(configuration.apiKey)}")
   }
 
   /**
    * Trigger an event and emit progressive [TriggerUpdate]s.
-   *
-   * This is an Android-first API that mirrors the iOS `trigger(...)` semantics closely, but
-   * currently implements only gate-plan handling (journey evaluation is not ported yet).
    */
   fun trigger(
     event: String,
@@ -271,13 +361,46 @@ class NuxieSDK private constructor() {
     val events = eventService ?: return TriggerHandle.empty
     val featureSvc = featureService
     val featureInfo = featureInfo
+    val journeys = journeyService
+    val broker = triggerBroker
     val sdkScope = scope ?: return TriggerHandle.empty
 
     val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+    var registeredEventId: String? = null
 
-    suspend fun emit(update: TriggerUpdate) {
+    suspend fun emitMain(update: TriggerUpdate) {
       if (handler == null) return
       withContext(Dispatchers.Main) { handler.invoke(update) }
+    }
+
+    fun modeFor(plan: GatePlan?): TriggerMode {
+      if (plan == null) return TriggerMode.FLOW
+      return when (plan.decision) {
+        GatePlan.Decision.ALLOW, GatePlan.Decision.DENY -> TriggerMode.IMMEDIATE
+        GatePlan.Decision.SHOW_FLOW -> TriggerMode.FLOW
+        GatePlan.Decision.REQUIRE_FEATURE -> TriggerMode.REQUIRE_FEATURE
+      }
+    }
+
+    fun shouldComplete(update: TriggerUpdate, mode: TriggerMode): Boolean {
+      return when (update) {
+        is TriggerUpdate.Error -> true
+        is TriggerUpdate.Decision -> when (update.decision) {
+          TriggerDecision.AllowedImmediate,
+          TriggerDecision.DeniedImmediate,
+          TriggerDecision.NoMatch,
+          is TriggerDecision.Suppressed,
+          -> true
+          else -> false
+        }
+        is TriggerUpdate.Entitlement -> when (update.entitlement) {
+          is EntitlementUpdate.Allowed,
+          EntitlementUpdate.Denied,
+          -> true
+          EntitlementUpdate.Pending -> false
+        }
+        is TriggerUpdate.Journey -> mode == TriggerMode.FLOW
+      }
     }
 
     fun hasAccess(access: FeatureAccess?, requiredBalance: Int?): Boolean {
@@ -308,23 +431,63 @@ class NuxieSDK private constructor() {
         )
 
         val gatePlan: GatePlan? = response.gatePlan(json)
+        val triggerMode = modeFor(gatePlan)
+        val eventId = nuxieEvent.id
+        registeredEventId = eventId
+
+        suspend fun emit(update: TriggerUpdate) {
+          if (broker != null) {
+            broker.emit(eventId, update)
+          } else {
+            emitMain(update)
+          }
+        }
+
+        if (broker != null && handler != null) {
+          broker.register(eventId) { update ->
+            emitMain(update)
+            if (shouldComplete(update, triggerMode)) {
+              broker.complete(eventId)
+            }
+          }
+        }
+
+        var emittedJourneyDecision = false
+        if (journeys != null) {
+          val journeyResults = journeys.handleEventForTrigger(nuxieEvent)
+          for (result in journeyResults) {
+            when (result) {
+              is JourneyTriggerResult.Started -> {
+                emittedJourneyDecision = true
+                val ref = JourneyRef(
+                  journeyId = result.journey.id,
+                  campaignId = result.journey.campaignId,
+                  flowId = result.journey.flowId,
+                )
+                emit(TriggerUpdate.Decision(TriggerDecision.JourneyStarted(ref)))
+              }
+              is JourneyTriggerResult.Suppressed -> {
+                emittedJourneyDecision = true
+                emit(TriggerUpdate.Decision(TriggerDecision.Suppressed(result.reason)))
+              }
+            }
+          }
+        }
 
         if (gatePlan == null) {
-          emit(TriggerUpdate.Decision(TriggerDecision.NoMatch))
+          if (!emittedJourneyDecision) {
+            emit(TriggerUpdate.Decision(TriggerDecision.NoMatch))
+          }
           return@launch
         }
 
         when (gatePlan.decision) {
-          GatePlan.Decision.ALLOW -> {
-            emit(TriggerUpdate.Decision(TriggerDecision.AllowedImmediate))
-          }
-          GatePlan.Decision.DENY -> {
-            emit(TriggerUpdate.Decision(TriggerDecision.DeniedImmediate))
-          }
+          GatePlan.Decision.ALLOW -> emit(TriggerUpdate.Decision(TriggerDecision.AllowedImmediate))
+          GatePlan.Decision.DENY -> emit(TriggerUpdate.Decision(TriggerDecision.DeniedImmediate))
           GatePlan.Decision.SHOW_FLOW -> {
             val flowId = gatePlan.flowId
             if (flowId.isNullOrBlank()) {
-              emit(TriggerUpdate.Error(TriggerError(code = "flow_missing", message = "Missing flowId for show_flow decision")))
+              emit(TriggerUpdate.Error(TriggerError("flow_missing", "Missing flowId for show_flow decision")))
               return@launch
             }
             val ok = presentFlow(flowId)
@@ -334,15 +497,15 @@ class NuxieSDK private constructor() {
                 campaignId = "flow:$flowId",
                 flowId = flowId,
               )
-              emit(TriggerUpdate.Decision(TriggerDecision.FlowShown(ref)))
+              emit(TriggerUpdate.Decision(TriggerDecision.FlowShown(ref = ref)))
             } else {
-              emit(TriggerUpdate.Error(TriggerError(code = "flow_present_failed", message = "Failed to present flow")))
+              emit(TriggerUpdate.Error(TriggerError("flow_present_failed", "Failed to present flow")))
             }
           }
           GatePlan.Decision.REQUIRE_FEATURE -> {
             val featureId = gatePlan.featureId
             if (featureId.isNullOrBlank()) {
-              emit(TriggerUpdate.Error(TriggerError(code = "feature_missing", message = "Missing featureId for require_feature decision")))
+              emit(TriggerUpdate.Error(TriggerError("feature_missing", "Missing featureId for require_feature decision")))
               return@launch
             }
 
@@ -379,7 +542,7 @@ class NuxieSDK private constructor() {
             if (!flowId.isNullOrBlank()) {
               val ok = presentFlow(flowId)
               if (!ok) {
-                emit(TriggerUpdate.Error(TriggerError(code = "flow_present_failed", message = "Failed to present flow")))
+                emit(TriggerUpdate.Error(TriggerError("flow_present_failed", "Failed to present flow")))
                 return@launch
               }
               val ref = JourneyRef(
@@ -401,15 +564,23 @@ class NuxieSDK private constructor() {
               delay(350)
             }
 
-            emit(TriggerUpdate.Error(TriggerError(code = "entitlement_timeout", message = "Timed out waiting for entitlement")))
+            emit(TriggerUpdate.Error(TriggerError("entitlement_timeout", "Timed out waiting for entitlement")))
           }
         }
       } catch (t: Throwable) {
-        emit(TriggerUpdate.Error(TriggerError(code = "trigger_failed", message = t.message ?: "trigger_failed")))
+        emitMain(TriggerUpdate.Error(TriggerError("trigger_failed", t.message ?: "trigger_failed")))
       }
     }
 
-    return TriggerHandle(cancelHandler = { job.cancel() })
+    return TriggerHandle(
+      cancelHandler = {
+        job.cancel()
+        val eventId = registeredEventId
+        if (!eventId.isNullOrBlank() && broker != null) {
+          sdkScope.launch { broker.complete(eventId) }
+        }
+      }
+    )
   }
 
   fun identify(
@@ -435,6 +606,8 @@ class NuxieSDK private constructor() {
       scope?.launch {
         profileService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
         featureService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
+        segmentService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
+        journeyService?.handleUserChange(fromOldDistinctId = oldDistinctId, toNewDistinctId = currentDistinctId)
       }
     }
 
@@ -479,6 +652,8 @@ class NuxieSDK private constructor() {
       profileService?.clearCache(prevDistinctId)
       profileService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
       featureService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
+      segmentService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
+      journeyService?.handleUserChange(fromOldDistinctId = prevDistinctId, toNewDistinctId = newDistinctId)
       flowService?.clearCache()
     }
   }
@@ -506,6 +681,8 @@ class NuxieSDK private constructor() {
     // Best-effort cleanup.
     networkQueue?.stop()
     profileService?.shutdown()
+    journeyService?.shutdown()
+    triggerBroker?.reset()
     activityTracker?.stop()
     activityTracker = null
     scope?.cancel()
@@ -522,6 +699,10 @@ class NuxieSDK private constructor() {
     featureInfo = null
     profileService = null
     flowService = null
+    segmentService = null
+    journeyService = null
+    triggerBroker = null
+    irRuntime = null
     delegate = null
     configuration = null
   }
@@ -536,9 +717,18 @@ class NuxieSDK private constructor() {
     if (!isSetup) throw NuxieError.NotConfigured
     val profile = profileService ?: throw NuxieError.NotConfigured
     val features = featureService ?: throw NuxieError.NotConfigured
+    val segments = segmentService
+    val journeys = journeyService
+    val identity = identityService
     val res = profile.refetchProfile()
     // Profile may contain updated features.
     features.syncFeatureInfo()
+    if (segments != null && identity != null) {
+      runCatching { segments.updateSegments(res.segments, distinctId = identity.getDistinctId()) }
+    }
+    if (journeys != null && identity != null) {
+      runCatching { journeys.handleSegmentChange(identity.getDistinctId(), res.segments.map { it.id }.toSet()) }
+    }
     flowService?.prefetchFlows(res.flows)
     return res
   }
@@ -567,6 +757,12 @@ class NuxieSDK private constructor() {
     if (!isSetup) throw NuxieError.NotConfigured
     val svc = flowService ?: throw NuxieError.NotConfigured
     return svc.getFlowView(activity, flowId, runtimeDelegate = null)
+  }
+
+  internal suspend fun getFlowViewForJourney(activity: Activity, flowId: String, journeyId: String): FlowView {
+    if (!isSetup) throw NuxieError.NotConfigured
+    val svc = journeyService ?: throw NuxieError.NotConfigured
+    return svc.createFlowViewForJourney(activity, flowId, journeyId)
   }
 
   suspend fun hasFeature(featureId: String): FeatureAccess {

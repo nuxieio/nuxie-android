@@ -132,6 +132,18 @@ class FlowView(context: Context) : FrameLayout(context) {
     webView.sendBridgeMessage(type = type, payload = payload, replyTo = replyTo)
   }
 
+  fun performPurchase(productId: String) {
+    handlePurchase(productId)
+  }
+
+  fun performRestore() {
+    handleRestore()
+  }
+
+  fun performOpenLink(urlString: String, target: String?) {
+    openLinkInternal(urlString, target)
+  }
+
   fun performDismiss(reason: CloseReason = CloseReason.UserDismissed) {
     runtimeDelegate?.onDismissRequested(reason)
     invokeOnCloseOnce(reason)
@@ -176,7 +188,7 @@ class FlowView(context: Context) : FrameLayout(context) {
         } else {
           val url = (payload["url"] as? JsonPrimitive)?.contentOrNull ?: return
           val target = (payload["target"] as? JsonPrimitive)?.contentOrNull
-          performOpenLink(url, target)
+          openLinkInternal(url, target)
         }
       }
 
@@ -284,7 +296,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
   }
 
-  private fun performOpenLink(urlString: String, target: String?) {
+  private fun openLinkInternal(urlString: String, target: String?) {
     val uri = runCatching { Uri.parse(urlString) }.getOrNull() ?: return
     val intent = Intent(Intent.ACTION_VIEW, uri).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

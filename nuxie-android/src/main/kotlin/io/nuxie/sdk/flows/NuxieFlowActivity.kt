@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 class NuxieFlowActivity : Activity() {
   companion object {
     const val EXTRA_FLOW_ID: String = "io.nuxie.sdk.extra.FLOW_ID"
+    const val EXTRA_JOURNEY_ID: String = "io.nuxie.sdk.extra.JOURNEY_ID"
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -26,6 +27,7 @@ class NuxieFlowActivity : Activity() {
       finish()
       return
     }
+    val journeyId = intent?.getStringExtra(EXTRA_JOURNEY_ID)
 
     val sdk = NuxieSDK.shared()
     if (!sdk.isSetup) {
@@ -35,7 +37,13 @@ class NuxieFlowActivity : Activity() {
     }
 
     scope.launch {
-      val view = runCatching { sdk.getFlowView(this@NuxieFlowActivity, flowId) }.getOrElse {
+      val view = runCatching {
+        if (!journeyId.isNullOrBlank()) {
+          sdk.getFlowViewForJourney(this@NuxieFlowActivity, flowId, journeyId)
+        } else {
+          sdk.getFlowView(this@NuxieFlowActivity, flowId)
+        }
+      }.getOrElse {
         NuxieLogger.warning("Failed to create FlowView for $flowId: ${it.message}", it)
         FlowView(this@NuxieFlowActivity).apply {
           onDismissRequested = { finish() }
