@@ -1,6 +1,7 @@
 package io.nuxie.sdk.config
 
 import io.nuxie.sdk.events.NuxieEvent
+import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
 
 /**
  * Configuration object for initializing the Nuxie SDK.
@@ -74,6 +75,9 @@ class NuxieConfiguration(
   // Plugins
   var enablePlugins: Boolean = true
 
+  // Purchases
+  var purchaseDelegate: NuxiePurchaseDelegate? = null
+
   // Event system hooks
   var propertiesSanitizer: NuxiePropertiesSanitizer? = null
   var beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null
@@ -89,4 +93,3 @@ class NuxieConfiguration(
 fun interface NuxiePropertiesSanitizer {
   fun sanitize(properties: Map<String, Any?>): Map<String, Any?>
 }
-
