@@ -54,7 +54,7 @@ class NuxieFlowActivity : Activity() {
     scope.cancel()
   }
 
-  @Suppress("DEPRECATION")
+  @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
   override fun onBackPressed() {
     // Treat back as user dismissal.
     flowView?.performDismiss(CloseReason.UserDismissed)

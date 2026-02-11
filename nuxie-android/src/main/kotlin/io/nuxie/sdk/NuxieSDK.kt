@@ -22,6 +22,7 @@ import io.nuxie.sdk.features.FeatureUsageResult
 import io.nuxie.sdk.flows.FlowService
 import io.nuxie.sdk.flows.FlowView
 import io.nuxie.sdk.flows.NuxieFlowActivity
+import io.nuxie.sdk.gating.GatePlan
 import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.identity.IdentityService
 import io.nuxie.sdk.lifecycle.CurrentActivityTracker
@@ -41,11 +42,22 @@ import io.nuxie.sdk.storage.db.NuxieDatabase
 import io.nuxie.sdk.util.Iso8601
 import io.nuxie.sdk.util.UuidV7
 import io.nuxie.sdk.util.toJsonObject
+import io.nuxie.sdk.triggers.EntitlementUpdate
+import io.nuxie.sdk.triggers.GateSource
+import io.nuxie.sdk.triggers.JourneyRef
+import io.nuxie.sdk.triggers.TriggerDecision
+import io.nuxie.sdk.triggers.TriggerError
+import io.nuxie.sdk.triggers.TriggerHandle
+import io.nuxie.sdk.triggers.TriggerUpdate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import java.io.File
 
 /**
@@ -175,6 +187,7 @@ class NuxieSDK private constructor() {
       identityService = requireNotNull(identityService),
       sessionService = requireNotNull(sessionService),
       configuration = configuration,
+      api = api,
       store = store,
       networkQueue = queue,
       scope = sdkScope,
@@ -236,6 +249,164 @@ class NuxieSDK private constructor() {
     this.flowService = flows
 
     NuxieLogger.info("Setup completed with API key: ${NuxieLogger.logApiKey(configuration.apiKey)}")
+  }
+
+  /**
+   * Trigger an event and emit progressive [TriggerUpdate]s.
+   *
+   * This is an Android-first API that mirrors the iOS `trigger(...)` semantics closely, but
+   * currently implements only gate-plan handling (journey evaluation is not ported yet).
+   */
+  fun trigger(
+    event: String,
+    properties: Map<String, Any?>? = null,
+    userProperties: Map<String, Any?>? = null,
+    userPropertiesSetOnce: Map<String, Any?>? = null,
+    handler: ((TriggerUpdate) -> Unit)? = null,
+  ): TriggerHandle {
+    if (!isSetup) return TriggerHandle.empty
+    val events = eventService ?: return TriggerHandle.empty
+    val featureSvc = featureService
+    val featureInfo = featureInfo
+    val sdkScope = scope ?: return TriggerHandle.empty
+
+    val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    suspend fun emit(update: TriggerUpdate) {
+      if (handler == null) return
+      withContext(Dispatchers.Main) { handler.invoke(update) }
+    }
+
+    fun hasAccess(access: FeatureAccess?, requiredBalance: Int?): Boolean {
+      if (access == null) return false
+      if (access.type == io.nuxie.sdk.features.FeatureType.BOOLEAN) return access.allowed
+      if (access.unlimited) return true
+      val required = requiredBalance ?: 1
+      return (access.balance ?: 0) >= required
+    }
+
+    suspend fun presentFlow(flowId: String): Boolean {
+      val activity = activityTracker?.getCurrentActivity() ?: return false
+      val intent = Intent(activity, NuxieFlowActivity::class.java)
+        .putExtra(NuxieFlowActivity.EXTRA_FLOW_ID, flowId)
+      return runCatching {
+        withContext(Dispatchers.Main) { activity.startActivity(intent) }
+        true
+      }.getOrDefault(false)
+    }
+
+    val job = sdkScope.launch {
+      try {
+        val (nuxieEvent, response) = events.trackForTrigger(
+          event = event,
+          properties = properties,
+          userProperties = userProperties,
+          userPropertiesSetOnce = userPropertiesSetOnce,
+        )
+
+        val gatePlan: GatePlan? = response.gatePlan(json)
+
+        if (gatePlan == null) {
+          emit(TriggerUpdate.Decision(TriggerDecision.NoMatch))
+          return@launch
+        }
+
+        when (gatePlan.decision) {
+          GatePlan.Decision.ALLOW -> {
+            emit(TriggerUpdate.Decision(TriggerDecision.AllowedImmediate))
+          }
+          GatePlan.Decision.DENY -> {
+            emit(TriggerUpdate.Decision(TriggerDecision.DeniedImmediate))
+          }
+          GatePlan.Decision.SHOW_FLOW -> {
+            val flowId = gatePlan.flowId
+            if (flowId.isNullOrBlank()) {
+              emit(TriggerUpdate.Error(TriggerError(code = "flow_missing", message = "Missing flowId for show_flow decision")))
+              return@launch
+            }
+            val ok = presentFlow(flowId)
+            if (ok) {
+              val ref = JourneyRef(
+                journeyId = UuidV7.generateString(),
+                campaignId = "flow:$flowId",
+                flowId = flowId,
+              )
+              emit(TriggerUpdate.Decision(TriggerDecision.FlowShown(ref)))
+            } else {
+              emit(TriggerUpdate.Error(TriggerError(code = "flow_present_failed", message = "Failed to present flow")))
+            }
+          }
+          GatePlan.Decision.REQUIRE_FEATURE -> {
+            val featureId = gatePlan.featureId
+            if (featureId.isNullOrBlank()) {
+              emit(TriggerUpdate.Error(TriggerError(code = "feature_missing", message = "Missing featureId for require_feature decision")))
+              return@launch
+            }
+
+            if (gatePlan.policy == GatePlan.Policy.CACHE_ONLY) {
+              val cached = featureInfo?.feature(featureId)
+              if (hasAccess(cached, requiredBalance = gatePlan.requiredBalance)) {
+                emit(TriggerUpdate.Entitlement(EntitlementUpdate.Allowed(GateSource.CACHE)))
+              } else {
+                emit(TriggerUpdate.Entitlement(EntitlementUpdate.Denied))
+              }
+              return@launch
+            }
+
+            // Cache-first check before presenting the flow.
+            val cachedAllowed = runCatching {
+              featureSvc?.checkWithCache(
+                featureId = featureId,
+                requiredBalance = gatePlan.requiredBalance,
+                entityId = gatePlan.entityId,
+                forceRefresh = false,
+              )
+            }.getOrNull()?.let { access ->
+              hasAccess(access, requiredBalance = gatePlan.requiredBalance)
+            } == true
+
+            if (cachedAllowed) {
+              emit(TriggerUpdate.Entitlement(EntitlementUpdate.Allowed(GateSource.CACHE)))
+              return@launch
+            }
+
+            emit(TriggerUpdate.Entitlement(EntitlementUpdate.Pending))
+
+            val flowId = gatePlan.flowId
+            if (!flowId.isNullOrBlank()) {
+              val ok = presentFlow(flowId)
+              if (!ok) {
+                emit(TriggerUpdate.Error(TriggerError(code = "flow_present_failed", message = "Failed to present flow")))
+                return@launch
+              }
+              val ref = JourneyRef(
+                journeyId = UuidV7.generateString(),
+                campaignId = "flow:$flowId",
+                flowId = flowId,
+              )
+              emit(TriggerUpdate.Decision(TriggerDecision.FlowShown(ref)))
+            }
+
+            val timeoutMs = gatePlan.timeoutMs ?: 30_000
+            val deadline = System.currentTimeMillis() + timeoutMs.toLong()
+            while (System.currentTimeMillis() < deadline && isActive) {
+              val access = featureInfo?.feature(featureId)
+              if (hasAccess(access, requiredBalance = gatePlan.requiredBalance)) {
+                emit(TriggerUpdate.Entitlement(EntitlementUpdate.Allowed(GateSource.PURCHASE)))
+                return@launch
+              }
+              delay(350)
+            }
+
+            emit(TriggerUpdate.Error(TriggerError(code = "entitlement_timeout", message = "Timed out waiting for entitlement")))
+          }
+        }
+      } catch (t: Throwable) {
+        emit(TriggerUpdate.Error(TriggerError(code = "trigger_failed", message = t.message ?: "trigger_failed")))
+      }
+    }
+
+    return TriggerHandle(cancelHandler = { job.cancel() })
   }
 
   fun identify(
