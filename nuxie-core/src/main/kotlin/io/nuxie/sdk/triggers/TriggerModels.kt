@@ -1,5 +1,8 @@
 package io.nuxie.sdk.triggers
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
 /**
  * Progressive trigger updates emitted by `trigger(...)`.
  *
@@ -53,11 +56,24 @@ data class JourneyUpdate(
   val flowExitReason: String?,
 )
 
+@Serializable
 enum class JourneyExitReason {
+  @SerialName("completed")
   COMPLETED,
+
+  @SerialName("goal_met")
   GOAL_MET,
+
+  @SerialName("trigger_unmatched")
+  TRIGGER_UNMATCHED,
+
+  @SerialName("expired")
   EXPIRED,
+
+  @SerialName("error")
   ERROR,
+
+  @SerialName("cancelled")
   CANCELLED,
 }
 
