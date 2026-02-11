@@ -216,6 +216,71 @@ class EventService(
     return enriched to response
   }
 
+  /**
+   * Track an event synchronously and return the server response.
+   *
+   * Mirrors iOS `EventService.trackWithResponse(...)`:
+   * - flushes pending batch queue first (best-effort) to preserve ordering
+   * - calls `POST /event` directly
+   * - records a local history copy (best-effort)
+   */
+  suspend fun trackWithResponse(
+    event: String,
+    properties: Map<String, Any?>? = null,
+  ): EventResponse {
+    if (event.isBlank()) {
+      throw IllegalArgumentException("Event name cannot be empty")
+    }
+
+    // Ensure queued events are delivered first so server state observes the same order.
+    runCatching { networkQueue.flush(forceSend = true) }
+
+    val distinctId = identityService.getDistinctId()
+
+    val mergedProps = buildMap<String, Any?> {
+      putAll(properties ?: emptyMap())
+
+      if (!containsKey("\$session_id")) {
+        val sessionId = sessionService.getSessionId(readOnly = false)
+        if (sessionId != null) {
+          put("\$session_id", sessionId)
+          sessionService.touchSession()
+        }
+      }
+    }.let { props ->
+      configuration.propertiesSanitizer?.sanitize(props) ?: props
+    }
+
+    val nuxieEvent = NuxieEvent(
+      name = event,
+      distinctId = distinctId,
+      properties = mergedProps,
+    )
+
+    val finalEvent = if (configuration.beforeSend != null) {
+      configuration.beforeSend?.invoke(nuxieEvent) ?: throw IllegalStateException("Event dropped by beforeSend")
+    } else {
+      nuxieEvent
+    }
+
+    // Store event locally (best-effort) before further stateful evaluation happens (segments/journeys).
+    runCatching { historyStore.insert(storedEvent(finalEvent)) }
+
+    val propsJson: JsonObject = toJsonObject(finalEvent.properties)
+    val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)
+
+    return api.trackEvent(
+      event = finalEvent.name,
+      distinctId = finalEvent.distinctId,
+      anonDistinctId = anonDistinctId,
+      properties = propsJson,
+      uuid = finalEvent.id,
+      value = (finalEvent.properties["value"] as? Number)?.toDouble(),
+      entityId = finalEvent.properties["entityId"] as? String,
+      timestamp = finalEvent.timestamp,
+    )
+  }
+
   suspend fun getRecentEvents(limit: Int = 100): List<StoredEvent> {
     return historyStore.getRecentEvents(limit)
   }
