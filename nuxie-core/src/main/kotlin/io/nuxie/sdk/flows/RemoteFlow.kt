@@ -168,6 +168,11 @@ sealed interface InteractionTrigger {
   ) : InteractionTrigger
 
   @Serializable
+  data class Start(
+    val config: JsonObject? = null,
+  ) : InteractionTrigger
+
+  @Serializable
   data class Unknown(
     val type: String,
     val payload: JsonObject = JsonObject(emptyMap()),
@@ -205,6 +210,7 @@ object InteractionTriggerSerializer : kotlinx.serialization.KSerializer<Interact
       "event" -> input.json.decodeFromJsonElement(InteractionTrigger.Event.serializer(), el)
       "manual" -> input.json.decodeFromJsonElement(InteractionTrigger.Manual.serializer(), el)
       "did_set" -> input.json.decodeFromJsonElement(InteractionTrigger.DidSet.serializer(), el)
+      "start" -> input.json.decodeFromJsonElement(InteractionTrigger.Start.serializer(), el)
       else -> InteractionTrigger.Unknown(type = type, payload = obj)
     }
   }
@@ -241,6 +247,10 @@ object InteractionTriggerSerializer : kotlinx.serialization.KSerializer<Interact
         put("type", "did_set")
         put("path", output.json.encodeToJsonElement(VmPathRefSerializer, value.path))
         if (value.debounceMs != null) put("debounceMs", value.debounceMs)
+      }
+      is InteractionTrigger.Start -> buildJsonObject {
+        put("type", "start")
+        if (value.config != null) put("config", value.config)
       }
       is InteractionTrigger.Unknown -> value.payload
     }

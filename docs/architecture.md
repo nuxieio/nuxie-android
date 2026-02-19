@@ -27,6 +27,13 @@ This SDK is split into core runtime and Android platform integration.
 5. Delegate callbacks are emitted for flow actions.
 6. Profile refresh syncs features, segments, journeys, and flows.
 
+## Flow Interaction Contract
+
+- Flow-level/global interactions are hosted under `interactions["__global__"]`.
+- Flow entry executes from enabled global interactions with `trigger.type == "start"`.
+- Runtime no longer uses legacy `interactions["start"]` or `$flow_entered` for entry.
+- Generic trigger dispatch (event/manual/did_set) evaluates global interactions alongside screen/component interactions.
+
 ## Key Services
 
 - `IdentityService`: manages distinct/anonymous IDs and user properties.

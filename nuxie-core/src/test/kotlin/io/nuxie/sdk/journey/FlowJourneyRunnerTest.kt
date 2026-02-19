@@ -226,6 +226,31 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun runtimeReadyExecutesGlobalStartInteraction() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Navigate(screenId = "screen_2")),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertEquals("screen_2", harness.journey.flowState.currentScreenId)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun pressTriggerNavigatesToSecondScreen() = runBlocking {
     val interactions = mapOf(
       "screen_1" to listOf(
@@ -253,6 +278,110 @@ class FlowJourneyRunnerTest {
       assertEquals(listOf("screen_2"), harness.host.shownScreens)
       assertEquals("screen_2", harness.journey.flowState.currentScreenId)
       assertEquals(listOf("screen_1"), harness.journey.flowState.navigationStack)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun dispatchEventTriggerIncludesGlobalInteractions() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "global_event",
+          trigger = InteractionTrigger.Event(eventName = "promo_ready"),
+          actions = listOf(InteractionAction.Navigate(screenId = "screen_2")),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.dispatchEventTrigger(
+        NuxieEvent(name = "promo_ready", distinctId = "user_1"),
+      )
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertEquals("screen_2", harness.journey.flowState.currentScreenId)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun didSetTriggerIncludesGlobalInteractions() = runBlocking {
+    val path = VmPathRef(pathIds = listOf(100, 2))
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "global_did_set",
+          trigger = InteractionTrigger.DidSet(path = path),
+          actions = listOf(InteractionAction.Navigate(screenId = "screen_2")),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.handleDidSet(
+        path = path,
+        value = JsonPrimitive(1),
+        source = "runtime",
+        screenId = "screen_1",
+        instanceId = null,
+      )
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertEquals("screen_2", harness.journey.flowState.currentScreenId)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun didSetDebounceIsolatedPerInteractionAcrossScreenAndGlobalScopes() = runBlocking {
+    val path = VmPathRef(pathIds = listOf(100, 2))
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "screen_did_set",
+          trigger = InteractionTrigger.DidSet(path = path, debounceMs = 5),
+          actions = listOf(InteractionAction.CallDelegate(message = "screen_did_set")),
+          enabled = true,
+        )
+      ),
+      "__global__" to listOf(
+        Interaction(
+          id = "global_did_set",
+          trigger = InteractionTrigger.DidSet(path = path, debounceMs = 5),
+          actions = listOf(InteractionAction.CallDelegate(message = "global_did_set")),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.handleDidSet(
+        path = path,
+        value = JsonPrimitive(1),
+        source = "runtime",
+        screenId = "screen_1",
+        instanceId = null,
+      )
+      assertNull(outcome)
+      settle()
+
+      val messages = harness.host.delegateCalls.map { it.first }
+      assertEquals(2, messages.size)
+      assertTrue(messages.contains("screen_did_set"))
+      assertTrue(messages.contains("global_did_set"))
     } finally {
       harness.close()
     }
