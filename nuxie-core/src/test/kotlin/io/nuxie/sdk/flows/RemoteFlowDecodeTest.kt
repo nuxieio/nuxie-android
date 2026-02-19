@@ -32,6 +32,18 @@ class RemoteFlowDecodeTest {
         },
         "screens": [{ "id": "screen_1" }],
         "interactions": {
+          "__global__": [
+            {
+                "id": "int_start",
+                "trigger": {
+                  "type": "start",
+                  "config": { "type": "event", "eventName": "${'$'}app_opened" }
+                },
+              "actions": [
+                { "type": "navigate", "screenId": "screen_1" }
+              ]
+            }
+          ],
           "screen_1": [
             {
               "id": "i1",
@@ -91,6 +103,12 @@ class RemoteFlowDecodeTest {
     assertNotNull(interactions)
     assertEquals(3, interactions!!.size)
 
+    val globalInteractions = flow.interactions["__global__"]
+    assertNotNull(globalInteractions)
+    assertEquals(1, globalInteractions!!.size)
+    val startTrigger = globalInteractions.first().trigger as InteractionTrigger.Start
+    assertEquals("event", startTrigger.config?.get("type")?.toString()?.trim('"'))
+
     val press = interactions[0]
     assertTrue(press.trigger is InteractionTrigger.Press)
     assertEquals(1, press.actions.size)
@@ -116,4 +134,3 @@ class RemoteFlowDecodeTest {
     assertTrue(unknownAction.payload.containsKey("foo"))
   }
 }
-

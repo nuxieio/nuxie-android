@@ -89,6 +89,13 @@ Important `TriggerDecision` values:
 | `fun showFlow(flowId: String)` | Presents flow in SDK-managed `NuxieFlowActivity`. Requires foreground host activity. |
 | `suspend fun getFlowView(activity: Activity, flowId: String): FlowView` | Returns `FlowView` for custom host UI (Activity/Fragment/Compose). |
 
+### Flow Runtime Interaction Semantics
+
+- Global interactions are read from `interactions["__global__"]`.
+- Entry actions execute from enabled global interactions where `trigger.type == "start"`.
+- Generic trigger dispatch includes global interactions, in addition to screen/component buckets.
+- Legacy entry key `interactions["start"]` is not used.
+
 ## Plugin APIs
 
 | API | Description |

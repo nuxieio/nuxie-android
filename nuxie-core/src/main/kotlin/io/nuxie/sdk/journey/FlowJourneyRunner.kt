@@ -128,6 +128,10 @@ class FlowJourneyRunner(
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
   private var didWarnConverters: Boolean = false
 
+  private companion object {
+    const val GLOBAL_INTERACTIONS_KEY: String = "__global__"
+  }
+
   val isRuntimeReady: Boolean
     get() = runtimeReady
   private var runtimeReady: Boolean = false
@@ -261,6 +265,7 @@ class FlowJourneyRunner(
     if (!screenId.isNullOrBlank()) {
       candidates += interactionsById[screenId].orEmpty()
     }
+    candidates += interactionsById[GLOBAL_INTERACTIONS_KEY].orEmpty()
     if (candidates.isEmpty()) return null
 
     for (interaction in candidates) {
@@ -341,33 +346,14 @@ class FlowJourneyRunner(
     )
   }
 
-  private fun entryScreenId(interactions: List<Interaction>): String? {
-    for (interaction in interactions) {
-      for (action in interaction.actions) {
-        if (action is InteractionAction.Navigate && action.screenId.isNotBlank()) {
-          return action.screenId
-        }
-      }
-    }
-    return null
-  }
-
   private suspend fun runEntryActionsIfNeeded(): FlowRunOutcome? {
-    val entryInteractions = interactionsById["start"].orEmpty()
-    if (entryInteractions.isEmpty()) return null
+    val globalInteractions = interactionsById[GLOBAL_INTERACTIONS_KEY].orEmpty()
+    if (globalInteractions.isEmpty()) return null
 
-    val entryScreenId = entryScreenId(entryInteractions)
-    val event = makeSystemEvent(
-      name = SystemEventNames.flowEntered,
-      properties = if (!entryScreenId.isNullOrBlank()) mapOf("entry_screen_id" to entryScreenId) else emptyMap(),
-    )
-
-    for (interaction in entryInteractions) {
+    var queued = false
+    for (interaction in globalInteractions) {
       if (interaction.enabled == false) continue
-      val trigger = interaction.trigger as? InteractionTrigger.Event ?: continue
-      if (trigger.eventName != SystemEventNames.flowEntered) continue
-      val filter = trigger.filter
-      if (filter != null && !evalConditionIR(filter, event)) continue
+      if (interaction.trigger !is InteractionTrigger.Start) continue
 
       enqueueActions(
         interaction.actions,
@@ -378,8 +364,10 @@ class FlowJourneyRunner(
           instanceId = null,
         )
       )
+      queued = true
     }
 
+    if (!queued) return null
     return processQueue(resumeContext = null)
   }
 
@@ -1118,7 +1106,9 @@ class FlowJourneyRunner(
     screenId: String?,
     instanceId: String?,
   ): FlowRunOutcome? {
-    val interactions = if (screenId != null) interactionsById[screenId].orEmpty() else emptyList()
+    val interactions = mutableListOf<Interaction>()
+    if (screenId != null) interactions += interactionsById[screenId].orEmpty()
+    interactions += interactionsById[GLOBAL_INTERACTIONS_KEY].orEmpty()
     if (interactions.isEmpty()) return null
 
     for (interaction in interactions) {
@@ -1337,6 +1327,7 @@ class FlowJourneyRunner(
       expected is InteractionTrigger.Event && actual is InteractionTrigger.Event -> expected.eventName == actual.eventName
       expected is InteractionTrigger.DidSet && actual is InteractionTrigger.DidSet -> matchesViewModelPath(expected.path, actual.path)
       expected is InteractionTrigger.Manual && actual is InteractionTrigger.Manual -> true
+      expected is InteractionTrigger.Start && actual is InteractionTrigger.Start -> true
       else -> false
     }
   }
