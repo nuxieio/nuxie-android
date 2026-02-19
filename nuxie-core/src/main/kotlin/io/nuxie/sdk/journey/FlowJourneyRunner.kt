@@ -1118,7 +1118,7 @@ class FlowJourneyRunner(
 
       val debounceMs = trigger.debounceMs
       if (debounceMs != null && debounceMs > 0) {
-        val key = trigger.path.normalizedPath
+        val key = didSetDebounceKey(interaction.id, trigger.path)
         debounceJobs[key]?.cancel()
         debounceJobs[key] = scope.launch {
           delay(debounceMs.toLong())
@@ -1147,6 +1147,10 @@ class FlowJourneyRunner(
     }
 
     return processQueue(resumeContext = null)
+  }
+
+  private fun didSetDebounceKey(interactionId: String, path: VmPathRef): String {
+    return "$interactionId:${path.normalizedPath}"
   }
 
   private fun scheduleTriggerReset(path: VmPathRef, screenId: String?, instanceId: String?) {

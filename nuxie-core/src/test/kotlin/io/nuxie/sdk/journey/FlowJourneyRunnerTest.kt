@@ -345,6 +345,49 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun didSetDebounceIsolatedPerInteractionAcrossScreenAndGlobalScopes() = runBlocking {
+    val path = VmPathRef(pathIds = listOf(100, 2))
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "screen_did_set",
+          trigger = InteractionTrigger.DidSet(path = path, debounceMs = 5),
+          actions = listOf(InteractionAction.CallDelegate(message = "screen_did_set")),
+          enabled = true,
+        )
+      ),
+      "__global__" to listOf(
+        Interaction(
+          id = "global_did_set",
+          trigger = InteractionTrigger.DidSet(path = path, debounceMs = 5),
+          actions = listOf(InteractionAction.CallDelegate(message = "global_did_set")),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.handleDidSet(
+        path = path,
+        value = JsonPrimitive(1),
+        source = "runtime",
+        screenId = "screen_1",
+        instanceId = null,
+      )
+      assertNull(outcome)
+      settle()
+
+      val messages = harness.host.delegateCalls.map { it.first }
+      assertEquals(2, messages.size)
+      assertTrue(messages.contains("screen_did_set"))
+      assertTrue(messages.contains("global_did_set"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun delayActionPausesAndResumes() = runBlocking {
     val interactions = mapOf(
       "screen_1" to listOf(
