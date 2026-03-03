@@ -24,6 +24,8 @@ class FlowBridge(
   private var runtimeReady: Boolean = false
   private val pendingOutgoing = mutableListOf<BridgeEnvelope>()
 
+  fun isRuntimeReady(): Boolean = runtimeReady
+
   fun reset() {
     runtimeReady = false
     pendingOutgoing.clear()

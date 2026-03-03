@@ -299,6 +299,12 @@ class FlowView(context: Context) : FrameLayout(context) {
         latestSafeAreaInsets
       }
 
+    // Avoid queueing stale inset snapshots before runtime readiness; send latest once ready.
+    if (!webView.isRuntimeReady()) {
+      latestSafeAreaInsets = currentInsets
+      return
+    }
+
     if (!force && dispatchedSafeAreaInsets == currentInsets) return
 
     latestSafeAreaInsets = currentInsets
