@@ -3,8 +3,10 @@ package io.nuxie.sdk.flows
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -24,6 +26,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import kotlin.math.max
 
 class FlowView(context: Context) : FrameLayout(context) {
 
@@ -50,6 +53,27 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var scope: CoroutineScope? = null
   private var flow: Flow? = null
   private var bundleStore: FlowBundleStore? = null
+
+  private data class SafeAreaInsets(
+    val top: Int,
+    val bottom: Int,
+    val left: Int,
+    val right: Int,
+  )
+
+  private var latestSafeAreaInsets = SafeAreaInsets(top = 0, bottom = 0, left = 0, right = 0)
+  private var dispatchedSafeAreaInsets: SafeAreaInsets? = null
+
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    requestApplyInsets()
+  }
+
+  override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+    latestSafeAreaInsets = readSafeAreaInsets(insets)
+    dispatchSafeAreaInsets()
+    return super.onApplyWindowInsets(insets)
+  }
 
   fun load(
     flow: Flow,
@@ -94,6 +118,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     addView(webView)
     addView(loadingView)
     addView(errorView)
+    post { requestApplyInsets() }
 
     // Configure interception: cache-first bundle + fonts
     val interceptor = FlowResourceInterceptor(flow = flow, fontStore = fontStore)
@@ -158,7 +183,12 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   private fun handleBridgeMessage(type: String, payload: JsonObject, id: String?) {
     when (type) {
-      "runtime/ready",
+      "runtime/ready" -> {
+        runtimeDelegate?.onRuntimeMessage(type, payload, id)
+        // Runtime expressions require numeric inset values; resend on every runtime boot.
+        dispatchSafeAreaInsets(force = true)
+      }
+
       "runtime/screen_changed",
       "action/did_set",
       "action/event",
@@ -212,6 +242,83 @@ class FlowView(context: Context) : FrameLayout(context) {
         }
       }
     }
+  }
+
+  private fun readSafeAreaInsets(insets: WindowInsets?): SafeAreaInsets {
+    if (insets == null) {
+      return SafeAreaInsets(top = 0, bottom = 0, left = 0, right = 0)
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      val resolved = insets.getInsetsIgnoringVisibility(
+        WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+      )
+      return SafeAreaInsets(
+        top = resolved.top,
+        bottom = resolved.bottom,
+        left = resolved.left,
+        right = resolved.right,
+      )
+    }
+
+    @Suppress("DEPRECATION")
+    var top = insets.systemWindowInsetTop
+    @Suppress("DEPRECATION")
+    var bottom = insets.systemWindowInsetBottom
+    @Suppress("DEPRECATION")
+    var left = insets.systemWindowInsetLeft
+    @Suppress("DEPRECATION")
+    var right = insets.systemWindowInsetRight
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      val cutout = insets.displayCutout
+      if (cutout != null) {
+        top = max(top, cutout.safeInsetTop)
+        bottom = max(bottom, cutout.safeInsetBottom)
+        left = max(left, cutout.safeInsetLeft)
+        right = max(right, cutout.safeInsetRight)
+      }
+    }
+
+    return SafeAreaInsets(top = top, bottom = bottom, left = left, right = right)
+  }
+
+  private fun readCurrentSafeAreaInsets(): SafeAreaInsets {
+    val insets =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) rootWindowInsets else null
+    return readSafeAreaInsets(insets)
+  }
+
+  private fun dispatchSafeAreaInsets(force: Boolean = false) {
+    if (!::webView.isInitialized) return
+
+    val currentInsets =
+      if (latestSafeAreaInsets == SafeAreaInsets(0, 0, 0, 0)) {
+        readCurrentSafeAreaInsets()
+      } else {
+        latestSafeAreaInsets
+      }
+
+    // Avoid queueing stale inset snapshots before runtime readiness; send latest once ready.
+    if (!webView.isRuntimeReady()) {
+      latestSafeAreaInsets = currentInsets
+      return
+    }
+
+    if (!force && dispatchedSafeAreaInsets == currentInsets) return
+
+    latestSafeAreaInsets = currentInsets
+    dispatchedSafeAreaInsets = currentInsets
+
+    webView.sendBridgeMessage(
+      type = "system/safe_area_insets",
+      payload = buildJsonObject {
+        put("top", JsonPrimitive(currentInsets.top))
+        put("bottom", JsonPrimitive(currentInsets.bottom))
+        put("left", JsonPrimitive(currentInsets.left))
+        put("right", JsonPrimitive(currentInsets.right))
+      },
+    )
   }
 
   private fun handlePurchase(productId: String) {

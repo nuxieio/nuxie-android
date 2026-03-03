@@ -60,6 +60,10 @@ class FlowWebView(
     bridge.send(type = type, payload = payload, replyTo = replyTo)
   }
 
+  fun isRuntimeReady(): Boolean {
+    return bridge.isRuntimeReady()
+  }
+
   private fun configure() {
     // Appearance
     setBackgroundColor(Color.TRANSPARENT)
