@@ -39,6 +39,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   var runtimeDelegate: FlowRuntimeDelegate? = null
   var onClose: ((CloseReason) -> Unit)? = null
   var onDismissRequested: ((CloseReason) -> Unit)? = null
+  var colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT
+    set(value) {
+      field = value
+      sendColorSchemeToRuntime()
+    }
 
   private var didInvokeClose: Boolean = false
   private var state: State = State.LOADING
@@ -125,6 +130,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     interceptor.setBundleDir(bundleStore.getCachedBundleDir(flow))
     webView.setResourceInterceptor(interceptor)
     webView.resetBridge()
+    sendColorSchemeToRuntime()
 
     // Prefetch fonts and bundle in the background (best-effort).
     scope.launch(Dispatchers.IO) {
@@ -187,8 +193,8 @@ class FlowView(context: Context) : FrameLayout(context) {
         runtimeDelegate?.onRuntimeMessage(type, payload, id)
         // Runtime expressions require numeric inset values; resend on every runtime boot.
         dispatchSafeAreaInsets(force = true)
+        sendColorSchemeToRuntime()
       }
-
       "runtime/screen_changed",
       "action/did_set",
       "action/event",
@@ -319,6 +325,14 @@ class FlowView(context: Context) : FrameLayout(context) {
         put("right", JsonPrimitive(currentInsets.right))
       },
     )
+  }
+
+  private fun sendColorSchemeToRuntime() {
+    if (!::webView.isInitialized) return
+    val payload = buildJsonObject {
+      put("mode", JsonPrimitive(colorSchemeMode.rawValue))
+    }
+    webView.sendBridgeMessage(type = "runtime/color_scheme", payload = payload)
   }
 
   private fun handlePurchase(productId: String) {

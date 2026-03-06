@@ -64,11 +64,17 @@ class FlowService(
    *
    * Must be called on the main thread (WebView construction).
    */
-  suspend fun getFlowView(context: Context, flowId: String, runtimeDelegate: FlowRuntimeDelegate? = null): FlowView {
+  suspend fun getFlowView(
+    context: Context,
+    flowId: String,
+    runtimeDelegate: FlowRuntimeDelegate? = null,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
+  ): FlowView {
     val flow = fetchFlow(flowId)
     return withContext(Dispatchers.Main.immediate) {
       FlowView(context).apply {
         this.runtimeDelegate = runtimeDelegate
+        this.colorSchemeMode = colorSchemeMode
         load(
           flow = flow,
           bundleStore = bundleStore,
@@ -83,8 +89,13 @@ class FlowService(
   /**
    * Convenience for Activity-hosted presentation (used by NuxieFlowActivity).
    */
-  suspend fun attachToActivity(activity: Activity, flowId: String, runtimeDelegate: FlowRuntimeDelegate? = null): FlowView {
-    return getFlowView(activity, flowId, runtimeDelegate)
+  suspend fun attachToActivity(
+    activity: Activity,
+    flowId: String,
+    runtimeDelegate: FlowRuntimeDelegate? = null,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
+  ): FlowView {
+    return getFlowView(activity, flowId, runtimeDelegate, colorSchemeMode)
   }
 
   suspend fun removeFlows(flowIds: List<String>) {
@@ -101,4 +112,3 @@ class FlowService(
     NuxieLogger.info("Cleared all flow caches")
   }
 }
-

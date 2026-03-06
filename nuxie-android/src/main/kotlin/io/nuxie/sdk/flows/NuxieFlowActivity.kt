@@ -14,6 +14,7 @@ class NuxieFlowActivity : Activity() {
   companion object {
     const val EXTRA_FLOW_ID: String = "io.nuxie.sdk.extra.FLOW_ID"
     const val EXTRA_JOURNEY_ID: String = "io.nuxie.sdk.extra.JOURNEY_ID"
+    const val EXTRA_COLOR_SCHEME_MODE: String = "io.nuxie.sdk.extra.COLOR_SCHEME_MODE"
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -28,6 +29,9 @@ class NuxieFlowActivity : Activity() {
       return
     }
     val journeyId = intent?.getStringExtra(EXTRA_JOURNEY_ID)
+    val colorSchemeMode = FlowColorSchemeMode.fromRawValue(
+      intent?.getStringExtra(EXTRA_COLOR_SCHEME_MODE),
+    )
 
     val sdk = NuxieSDK.shared()
     if (!sdk.isSetup) {
@@ -41,7 +45,11 @@ class NuxieFlowActivity : Activity() {
         if (!journeyId.isNullOrBlank()) {
           sdk.getFlowViewForJourney(this@NuxieFlowActivity, flowId, journeyId)
         } else {
-          sdk.getFlowView(this@NuxieFlowActivity, flowId)
+          sdk.getFlowView(
+            this@NuxieFlowActivity,
+            flowId,
+            colorSchemeMode = colorSchemeMode,
+          )
         }
       }.getOrElse {
         NuxieLogger.warning("Failed to create FlowView for $flowId: ${it.message}", it)
