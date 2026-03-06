@@ -20,6 +20,7 @@ import io.nuxie.sdk.features.FeatureInfo
 import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.features.FeatureUsageResult
 import io.nuxie.sdk.flows.FlowService
+import io.nuxie.sdk.flows.FlowColorSchemeMode
 import io.nuxie.sdk.flows.FlowView
 import io.nuxie.sdk.flows.NuxieFlowActivity
 import io.nuxie.sdk.flows.RemoteFlow
@@ -949,7 +950,10 @@ class NuxieSDK private constructor() {
     return res
   }
 
-  fun showFlow(flowId: String) {
+  fun showFlow(
+    flowId: String,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+  ) {
     if (!isSetup) {
       NuxieLogger.warning("showFlow called before SDK setup")
       return
@@ -961,6 +965,7 @@ class NuxieSDK private constructor() {
     }
     val intent = Intent(activity, NuxieFlowActivity::class.java)
       .putExtra(NuxieFlowActivity.EXTRA_FLOW_ID, flowId)
+      .putExtra(NuxieFlowActivity.EXTRA_COLOR_SCHEME_MODE, colorSchemeMode.rawValue)
 
     if (Looper.myLooper() == Looper.getMainLooper()) {
       activity.startActivity(intent)
@@ -969,10 +974,19 @@ class NuxieSDK private constructor() {
     }
   }
 
-  suspend fun getFlowView(activity: Activity, flowId: String): FlowView {
+  suspend fun getFlowView(
+    activity: Activity,
+    flowId: String,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+  ): FlowView {
     if (!isSetup) throw NuxieError.NotConfigured
     val svc = flowService ?: throw NuxieError.NotConfigured
-    return svc.getFlowView(activity, flowId, runtimeDelegate = null)
+    return svc.getFlowView(
+      activity,
+      flowId,
+      runtimeDelegate = null,
+      colorSchemeMode = colorSchemeMode,
+    )
   }
 
   internal suspend fun getFlowViewForJourney(activity: Activity, flowId: String, journeyId: String): FlowView {

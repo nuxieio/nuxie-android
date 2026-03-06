@@ -1,5 +1,6 @@
 package io.nuxie.sdk.flows
 
+import android.content.res.Configuration
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -39,6 +40,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   var runtimeDelegate: FlowRuntimeDelegate? = null
   var onClose: ((CloseReason) -> Unit)? = null
   var onDismissRequested: ((CloseReason) -> Unit)? = null
+  var colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM
+    set(value) {
+      field = value
+      sendColorSchemeToRuntime()
+    }
 
   private var didInvokeClose: Boolean = false
   private var state: State = State.LOADING
@@ -125,6 +131,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     interceptor.setBundleDir(bundleStore.getCachedBundleDir(flow))
     webView.setResourceInterceptor(interceptor)
     webView.resetBridge()
+    sendColorSchemeToRuntime()
 
     // Prefetch fonts and bundle in the background (best-effort).
     scope.launch(Dispatchers.IO) {
@@ -187,8 +194,8 @@ class FlowView(context: Context) : FrameLayout(context) {
         runtimeDelegate?.onRuntimeMessage(type, payload, id)
         // Runtime expressions require numeric inset values; resend on every runtime boot.
         dispatchSafeAreaInsets(force = true)
+        sendColorSchemeToRuntime()
       }
-
       "runtime/screen_changed",
       "action/did_set",
       "action/event",
@@ -319,6 +326,23 @@ class FlowView(context: Context) : FrameLayout(context) {
         put("right", JsonPrimitive(currentInsets.right))
       },
     )
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    if (colorSchemeMode == FlowColorSchemeMode.SYSTEM) {
+      sendColorSchemeToRuntime()
+    }
+  }
+
+  private fun sendColorSchemeToRuntime() {
+    if (!::webView.isInitialized) return
+    val resolvedMode = resolveFlowColorScheme(colorSchemeMode, resources.configuration)
+    val payload = buildJsonObject {
+      put("preferredMode", JsonPrimitive(colorSchemeMode.rawValue))
+      put("resolvedMode", JsonPrimitive(resolvedMode.rawValue))
+    }
+    webView.sendBridgeMessage(type = "runtime/color_scheme", payload = payload)
   }
 
   private fun handlePurchase(productId: String) {
