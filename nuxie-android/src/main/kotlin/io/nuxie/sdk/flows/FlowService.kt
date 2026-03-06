@@ -68,7 +68,7 @@ class FlowService(
     context: Context,
     flowId: String,
     runtimeDelegate: FlowRuntimeDelegate? = null,
-    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     val flow = fetchFlow(flowId)
     return withContext(Dispatchers.Main.immediate) {
@@ -93,7 +93,7 @@ class FlowService(
     activity: Activity,
     flowId: String,
     runtimeDelegate: FlowRuntimeDelegate? = null,
-    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     return getFlowView(activity, flowId, runtimeDelegate, colorSchemeMode)
   }

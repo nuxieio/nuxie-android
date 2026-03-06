@@ -1,6 +1,5 @@
 package io.nuxie.sdk.flows
 
-import android.content.res.Configuration
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -40,7 +39,7 @@ class FlowView(context: Context) : FrameLayout(context) {
   var runtimeDelegate: FlowRuntimeDelegate? = null
   var onClose: ((CloseReason) -> Unit)? = null
   var onDismissRequested: ((CloseReason) -> Unit)? = null
-  var colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM
+  var colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT
     set(value) {
       field = value
       sendColorSchemeToRuntime()
@@ -328,19 +327,10 @@ class FlowView(context: Context) : FrameLayout(context) {
     )
   }
 
-  override fun onConfigurationChanged(newConfig: Configuration) {
-    super.onConfigurationChanged(newConfig)
-    if (colorSchemeMode == FlowColorSchemeMode.SYSTEM) {
-      sendColorSchemeToRuntime()
-    }
-  }
-
   private fun sendColorSchemeToRuntime() {
     if (!::webView.isInitialized) return
-    val resolvedMode = resolveFlowColorScheme(colorSchemeMode, resources.configuration)
     val payload = buildJsonObject {
-      put("preferredMode", JsonPrimitive(colorSchemeMode.rawValue))
-      put("resolvedMode", JsonPrimitive(resolvedMode.rawValue))
+      put("mode", JsonPrimitive(colorSchemeMode.rawValue))
     }
     webView.sendBridgeMessage(type = "runtime/color_scheme", payload = payload)
   }

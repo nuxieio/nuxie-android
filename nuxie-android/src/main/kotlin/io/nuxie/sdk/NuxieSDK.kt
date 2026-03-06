@@ -952,7 +952,7 @@ class NuxieSDK private constructor() {
 
   fun showFlow(
     flowId: String,
-    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ) {
     if (!isSetup) {
       NuxieLogger.warning("showFlow called before SDK setup")
@@ -977,7 +977,7 @@ class NuxieSDK private constructor() {
   suspend fun getFlowView(
     activity: Activity,
     flowId: String,
-    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.SYSTEM,
+    colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     if (!isSetup) throw NuxieError.NotConfigured
     val svc = flowService ?: throw NuxieError.NotConfigured
