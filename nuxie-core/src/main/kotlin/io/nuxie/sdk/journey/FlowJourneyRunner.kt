@@ -130,6 +130,7 @@ class FlowJourneyRunner(
 
   private companion object {
     const val GLOBAL_INTERACTIONS_KEY: String = "__global__"
+    const val CURRENT_DEVICE_TIMEZONE_TOKEN: String = "__current_device__"
   }
 
   val isRuntimeReady: Boolean
@@ -619,14 +620,14 @@ class FlowJourneyRunner(
     )
   }
 
-  private fun handleTimeWindow(
+  private suspend fun handleTimeWindow(
     action: InteractionAction.TimeWindow,
     context: RuntimeTriggerContext,
     index: Int,
     resumeContext: ResumeContext?,
   ): ActionResult {
     val nowMs = nowEpochMillis()
-    val zone = runCatching { ZoneId.of(action.timezone) }.getOrNull() ?: ZoneId.systemDefault()
+    val zone = resolveTimeWindowZone(action.timezone)
     val now = Instant.ofEpochMilli(nowMs).atZone(zone)
 
     val start = parseTime(action.startTime) ?: return ActionResult.Continue
@@ -652,14 +653,18 @@ class FlowJourneyRunner(
     val startMin = start.first * 60 + start.second
     val endMin = end.first * 60 + end.second
 
-    if (startMin == endMin) return ActionResult.Continue
+    if (startMin == endMin) {
+      return runNestedActions(action.successActions.orEmpty(), context)
+    }
 
     val inWindow = if (startMin <= endMin) {
       curMin in startMin until endMin
     } else {
       curMin >= startMin || curMin < endMin
     }
-    if (inWindow) return ActionResult.Continue
+    if (inWindow) {
+      return runNestedActions(action.successActions.orEmpty(), context)
+    }
 
     val nextOpen = calculateNextWindowOpen(now, action.startTime, zone, action.daysOfWeek)
     return ActionResult.Pause(
@@ -672,6 +677,13 @@ class FlowJourneyRunner(
         maxTimeMs = null,
       )
     )
+  }
+
+  private fun resolveTimeWindowZone(rawTimezone: String): ZoneId {
+    if (rawTimezone == CURRENT_DEVICE_TIMEZONE_TOKEN) {
+      return ZoneId.systemDefault()
+    }
+    return runCatching { ZoneId.of(rawTimezone) }.getOrNull() ?: ZoneId.systemDefault()
   }
 
   private suspend fun handleWaitUntil(

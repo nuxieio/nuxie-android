@@ -58,6 +58,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 class FlowJourneyRunnerTest {
 
@@ -427,6 +429,48 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun timeWindowCurrentDeviceUsesRuntimeDeviceTimezone() = runBlocking {
+    val zone = ZoneId.systemDefault()
+    val now = ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, zone)
+    val start = now.minusHours(1)
+    val end = now.plusHours(1)
+
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "%02d:%02d".format(start.hour, start.minute),
+              endTime = "%02d:%02d".format(end.hour, end.minute),
+              timezone = "__current_device__",
+              successActions = listOf(InteractionAction.Navigate(screenId = "screen_2")),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = { now.toInstant().toEpochMilli() },
+    )
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertEquals("screen_2", harness.journey.flowState.currentScreenId)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun waitUntilResumesOnlyWhenConditionMatches() = runBlocking {
     val waitCondition = IREnvelope(
       irVersion = 1,
@@ -564,7 +608,10 @@ class FlowJourneyRunnerTest {
     delay(40)
   }
 
-  private fun newHarness(interactions: Map<String, List<Interaction>>): Harness {
+  private fun newHarness(
+    interactions: Map<String, List<Interaction>>,
+    nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+  ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val api = FakeApi()
     val identity = DefaultIdentityService(InMemoryKeyValueStore())
@@ -649,6 +696,7 @@ class FlowJourneyRunnerTest {
       profileService = profileService,
       irRuntime = irRuntime,
       scope = scope,
+      nowEpochMillis = nowEpochMillis,
     )
 
     return Harness(scope = scope, runner = runner, host = host, journey = journey)
