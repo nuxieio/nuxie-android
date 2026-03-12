@@ -306,12 +306,6 @@ class FlowJourneyRunner(
     isPaused = false
     journey.flowState.pendingAction = null
 
-    val actions = resolveActions(
-      interactionId = pending.interactionId,
-      screenId = pending.screenId,
-      componentId = pending.componentId,
-    ) ?: return null
-
     val context = RuntimeTriggerContext(
       screenId = pending.screenId,
       componentId = pending.componentId,
@@ -319,8 +313,20 @@ class FlowJourneyRunner(
       instanceId = null,
     )
 
-    activeRequest = ActionRequest(actions = actions, context = context)
-    activeIndex = if (pending.kind == FlowPendingActionKind.DELAY) pending.actionIndex + 1 else pending.actionIndex
+    if (pending.resumeActions != null) {
+      activeRequest = ActionRequest(actions = pending.resumeActions, context = context)
+      activeIndex = 0
+    } else {
+      val actions = resolveActions(
+        interactionId = pending.interactionId,
+        screenId = pending.screenId,
+        componentId = pending.componentId,
+      ) ?: return null
+
+      activeRequest = ActionRequest(actions = actions, context = context)
+      activeIndex =
+        if (pending.kind == FlowPendingActionKind.DELAY) pending.actionIndex + 1 else pending.actionIndex
+    }
 
     return processQueue(ResumeContext(pending = pending, reason = reason, event = event))
   }
@@ -405,9 +411,11 @@ class FlowJourneyRunner(
               break
             }
             is ActionResult.Pause -> {
+              val resumablePending =
+                attachResumeActions(result.pending, request.actions, activeIndex)
               isPaused = true
-              journey.flowState.pendingAction = result.pending
-              return FlowRunOutcome.Paused(result.pending)
+              journey.flowState.pendingAction = resumablePending
+              return FlowRunOutcome.Paused(resumablePending)
             }
             is ActionResult.Exit -> {
               return FlowRunOutcome.Exited(result.reason)
@@ -1103,13 +1111,38 @@ class FlowJourneyRunner(
     for ((idx, action) in actions.withIndex()) {
       when (val result = executeAction(action, context, idx, resumeContext = null)) {
         is ActionResult.Continue -> continue
+        is ActionResult.Pause ->
+          return ActionResult.Pause(
+            attachResumeActions(result.pending, actions, idx),
+          )
         is ActionResult.StopSequence,
-        is ActionResult.Pause,
         is ActionResult.Exit,
         -> return result
       }
     }
     return ActionResult.Continue
+  }
+
+  private fun buildResumeActions(
+    actions: List<InteractionAction>,
+    pausedIndex: Int,
+    pendingKind: FlowPendingActionKind,
+  ): List<InteractionAction> {
+    val resumeIndex = if (pendingKind == FlowPendingActionKind.DELAY) pausedIndex + 1 else pausedIndex
+    if (resumeIndex <= 0) return actions
+    if (resumeIndex >= actions.size) return emptyList()
+    return actions.drop(resumeIndex)
+  }
+
+  private fun attachResumeActions(
+    pending: FlowPendingAction,
+    actions: List<InteractionAction>,
+    pausedIndex: Int,
+  ): FlowPendingAction {
+    if (pending.resumeActions != null) return pending
+    return pending.copy(
+      resumeActions = buildResumeActions(actions, pausedIndex, pending.kind),
+    )
   }
 
   private suspend fun dispatchDidSetTrigger(

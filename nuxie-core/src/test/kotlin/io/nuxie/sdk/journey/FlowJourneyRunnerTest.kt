@@ -471,6 +471,51 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun timeWindowNestedDelayResumesRemainingActions() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "09:00",
+              endTime = "11:00",
+              timezone = "UTC",
+              successActions = listOf(
+                InteractionAction.Delay(durationMs = 1_000),
+                InteractionAction.Navigate(screenId = "screen_2"),
+              ),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = {
+        ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, ZoneId.of("UTC")).toInstant().toEpochMilli()
+      },
+    )
+    try {
+      val paused = harness.runner.handleRuntimeReady() as? FlowRunOutcome.Paused
+      assertNotNull(paused)
+      assertEquals(FlowPendingActionKind.DELAY, paused?.pending?.kind)
+
+      val resumed = harness.runner.resumePendingAction(ResumeReason.TIMER, event = null)
+      assertNull(resumed)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun waitUntilResumesOnlyWhenConditionMatches() = runBlocking {
     val waitCondition = IREnvelope(
       irVersion = 1,
