@@ -516,6 +516,67 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun timeWindowNestedDelayResumesOuterActions() = runBlocking {
+    val path = VmPathRef(pathIds = listOf(100, 1))
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_1",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "09:00",
+              endTime = "11:00",
+              timezone = "UTC",
+              successActions = listOf(
+                InteractionAction.Delay(durationMs = 1_000),
+                InteractionAction.SetViewModel(path = path, value = JsonPrimitive(5)),
+              ),
+            ),
+            InteractionAction.SetViewModel(path = path, value = JsonPrimitive(9)),
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = {
+        ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, ZoneId.of("UTC")).toInstant().toEpochMilli()
+      },
+    )
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val paused = harness.runner.dispatchTrigger(
+        trigger = InteractionTrigger.Press,
+        screenId = "screen_1",
+        componentId = null,
+        instanceId = null,
+        event = null,
+      ) as? FlowRunOutcome.Paused
+      assertNotNull(paused)
+      assertEquals(FlowPendingActionKind.DELAY, paused?.pending?.kind)
+
+      val resumed = harness.runner.resumePendingAction(ResumeReason.TIMER, event = null)
+      assertNull(resumed)
+      settle()
+
+      assertEquals(2, harness.host.runtimeMessages.count { it.type == "runtime/view_model_patch" })
+      val ref = JsonObject(
+        mapOf(
+          "ref" to JsonObject(mapOf("pathIds" to JsonArray(listOf(JsonPrimitive(100), JsonPrimitive(1)))))
+        )
+      )
+      val resolved = harness.runner.resolveRuntimeValue(ref, screenId = "screen_1", instanceId = null)
+      assertEquals(9, resolved)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun waitUntilResumesOnlyWhenConditionMatches() = runBlocking {
     val waitCondition = IREnvelope(
       irVersion = 1,

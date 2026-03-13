@@ -1139,9 +1139,18 @@ class FlowJourneyRunner(
     actions: List<InteractionAction>,
     pausedIndex: Int,
   ): FlowPendingAction {
-    if (pending.resumeActions != null) return pending
+    val trailingActions =
+      if (pausedIndex + 1 >= actions.size) {
+        emptyList()
+      } else {
+        actions.drop(pausedIndex + 1)
+      }
+    val resumeActions =
+      pending.resumeActions?.let { existing ->
+        if (trailingActions.isEmpty()) existing else existing + trailingActions
+      } ?: buildResumeActions(actions, pausedIndex, pending.kind)
     return pending.copy(
-      resumeActions = buildResumeActions(actions, pausedIndex, pending.kind),
+      resumeActions = resumeActions,
     )
   }
 
