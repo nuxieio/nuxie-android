@@ -44,6 +44,7 @@ data class FlowPendingAction(
   val condition: IREnvelope? = null,
   val maxTimeMs: Int? = null,
   val startedAtEpochMillis: Long,
+  val resumeActions: List<io.nuxie.sdk.flows.InteractionAction>? = null,
 )
 
 @Serializable

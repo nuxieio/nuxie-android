@@ -58,6 +58,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 class FlowJourneyRunnerTest {
 
@@ -427,6 +429,154 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun timeWindowCurrentDeviceUsesRuntimeDeviceTimezone() = runBlocking {
+    val zone = ZoneId.systemDefault()
+    val now = ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, zone)
+    val start = now.minusHours(1)
+    val end = now.plusHours(1)
+
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "%02d:%02d".format(start.hour, start.minute),
+              endTime = "%02d:%02d".format(end.hour, end.minute),
+              timezone = "__current_device__",
+              successActions = listOf(InteractionAction.Navigate(screenId = "screen_2")),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = { now.toInstant().toEpochMilli() },
+    )
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertEquals("screen_2", harness.journey.flowState.currentScreenId)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun timeWindowNestedDelayResumesRemainingActions() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "09:00",
+              endTime = "11:00",
+              timezone = "UTC",
+              successActions = listOf(
+                InteractionAction.Delay(durationMs = 1_000),
+                InteractionAction.Navigate(screenId = "screen_2"),
+              ),
+            )
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = {
+        ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, ZoneId.of("UTC")).toInstant().toEpochMilli()
+      },
+    )
+    try {
+      val paused = harness.runner.handleRuntimeReady() as? FlowRunOutcome.Paused
+      assertNotNull(paused)
+      assertEquals(FlowPendingActionKind.DELAY, paused?.pending?.kind)
+
+      val resumed = harness.runner.resumePendingAction(ResumeReason.TIMER, event = null)
+      assertNull(resumed)
+      settle()
+
+      assertEquals(listOf("screen_2"), harness.host.shownScreens)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun timeWindowNestedDelayResumesOuterActions() = runBlocking {
+    val path = VmPathRef(pathIds = listOf(100, 1))
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_1",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.TimeWindow(
+              startTime = "09:00",
+              endTime = "11:00",
+              timezone = "UTC",
+              successActions = listOf(
+                InteractionAction.Delay(durationMs = 1_000),
+                InteractionAction.SetViewModel(path = path, value = JsonPrimitive(5)),
+              ),
+            ),
+            InteractionAction.SetViewModel(path = path, value = JsonPrimitive(9)),
+          ),
+          enabled = true,
+        )
+      )
+    )
+
+    val harness = newHarness(
+      interactions = interactions,
+      nowEpochMillis = {
+        ZonedDateTime.of(2026, 1, 1, 10, 0, 0, 0, ZoneId.of("UTC")).toInstant().toEpochMilli()
+      },
+    )
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val paused = harness.runner.dispatchTrigger(
+        trigger = InteractionTrigger.Press,
+        screenId = "screen_1",
+        componentId = null,
+        instanceId = null,
+        event = null,
+      ) as? FlowRunOutcome.Paused
+      assertNotNull(paused)
+      assertEquals(FlowPendingActionKind.DELAY, paused?.pending?.kind)
+
+      val resumed = harness.runner.resumePendingAction(ResumeReason.TIMER, event = null)
+      assertNull(resumed)
+      settle()
+
+      assertEquals(2, harness.host.runtimeMessages.count { it.type == "runtime/view_model_patch" })
+      val ref = JsonObject(
+        mapOf(
+          "ref" to JsonObject(mapOf("pathIds" to JsonArray(listOf(JsonPrimitive(100), JsonPrimitive(1)))))
+        )
+      )
+      val resolved = harness.runner.resolveRuntimeValue(ref, screenId = "screen_1", instanceId = null)
+      assertEquals(9, resolved)
+      assertNull(harness.journey.flowState.pendingAction)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun waitUntilResumesOnlyWhenConditionMatches() = runBlocking {
     val waitCondition = IREnvelope(
       irVersion = 1,
@@ -564,7 +714,10 @@ class FlowJourneyRunnerTest {
     delay(40)
   }
 
-  private fun newHarness(interactions: Map<String, List<Interaction>>): Harness {
+  private fun newHarness(
+    interactions: Map<String, List<Interaction>>,
+    nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+  ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val api = FakeApi()
     val identity = DefaultIdentityService(InMemoryKeyValueStore())
@@ -649,6 +802,7 @@ class FlowJourneyRunnerTest {
       profileService = profileService,
       irRuntime = irRuntime,
       scope = scope,
+      nowEpochMillis = nowEpochMillis,
     )
 
     return Harness(scope = scope, runner = runner, host = host, journey = journey)

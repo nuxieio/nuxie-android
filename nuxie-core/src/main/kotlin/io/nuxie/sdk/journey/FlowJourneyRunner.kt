@@ -130,6 +130,7 @@ class FlowJourneyRunner(
 
   private companion object {
     const val GLOBAL_INTERACTIONS_KEY: String = "__global__"
+    const val CURRENT_DEVICE_TIMEZONE_TOKEN: String = "__current_device__"
   }
 
   val isRuntimeReady: Boolean
@@ -305,12 +306,6 @@ class FlowJourneyRunner(
     isPaused = false
     journey.flowState.pendingAction = null
 
-    val actions = resolveActions(
-      interactionId = pending.interactionId,
-      screenId = pending.screenId,
-      componentId = pending.componentId,
-    ) ?: return null
-
     val context = RuntimeTriggerContext(
       screenId = pending.screenId,
       componentId = pending.componentId,
@@ -318,8 +313,20 @@ class FlowJourneyRunner(
       instanceId = null,
     )
 
-    activeRequest = ActionRequest(actions = actions, context = context)
-    activeIndex = if (pending.kind == FlowPendingActionKind.DELAY) pending.actionIndex + 1 else pending.actionIndex
+    if (pending.resumeActions != null) {
+      activeRequest = ActionRequest(actions = pending.resumeActions, context = context)
+      activeIndex = 0
+    } else {
+      val actions = resolveActions(
+        interactionId = pending.interactionId,
+        screenId = pending.screenId,
+        componentId = pending.componentId,
+      ) ?: return null
+
+      activeRequest = ActionRequest(actions = actions, context = context)
+      activeIndex =
+        if (pending.kind == FlowPendingActionKind.DELAY) pending.actionIndex + 1 else pending.actionIndex
+    }
 
     return processQueue(ResumeContext(pending = pending, reason = reason, event = event))
   }
@@ -404,9 +411,11 @@ class FlowJourneyRunner(
               break
             }
             is ActionResult.Pause -> {
+              val resumablePending =
+                attachResumeActions(result.pending, request.actions, activeIndex)
               isPaused = true
-              journey.flowState.pendingAction = result.pending
-              return FlowRunOutcome.Paused(result.pending)
+              journey.flowState.pendingAction = resumablePending
+              return FlowRunOutcome.Paused(resumablePending)
             }
             is ActionResult.Exit -> {
               return FlowRunOutcome.Exited(result.reason)
@@ -619,14 +628,14 @@ class FlowJourneyRunner(
     )
   }
 
-  private fun handleTimeWindow(
+  private suspend fun handleTimeWindow(
     action: InteractionAction.TimeWindow,
     context: RuntimeTriggerContext,
     index: Int,
     resumeContext: ResumeContext?,
   ): ActionResult {
     val nowMs = nowEpochMillis()
-    val zone = runCatching { ZoneId.of(action.timezone) }.getOrNull() ?: ZoneId.systemDefault()
+    val zone = resolveTimeWindowZone(action.timezone)
     val now = Instant.ofEpochMilli(nowMs).atZone(zone)
 
     val start = parseTime(action.startTime) ?: return ActionResult.Continue
@@ -652,14 +661,18 @@ class FlowJourneyRunner(
     val startMin = start.first * 60 + start.second
     val endMin = end.first * 60 + end.second
 
-    if (startMin == endMin) return ActionResult.Continue
+    if (startMin == endMin) {
+      return runNestedActions(action.successActions.orEmpty(), context)
+    }
 
     val inWindow = if (startMin <= endMin) {
       curMin in startMin until endMin
     } else {
       curMin >= startMin || curMin < endMin
     }
-    if (inWindow) return ActionResult.Continue
+    if (inWindow) {
+      return runNestedActions(action.successActions.orEmpty(), context)
+    }
 
     val nextOpen = calculateNextWindowOpen(now, action.startTime, zone, action.daysOfWeek)
     return ActionResult.Pause(
@@ -672,6 +685,13 @@ class FlowJourneyRunner(
         maxTimeMs = null,
       )
     )
+  }
+
+  private fun resolveTimeWindowZone(rawTimezone: String): ZoneId {
+    if (rawTimezone == CURRENT_DEVICE_TIMEZONE_TOKEN) {
+      return ZoneId.systemDefault()
+    }
+    return runCatching { ZoneId.of(rawTimezone) }.getOrNull() ?: ZoneId.systemDefault()
   }
 
   private suspend fun handleWaitUntil(
@@ -1091,13 +1111,47 @@ class FlowJourneyRunner(
     for ((idx, action) in actions.withIndex()) {
       when (val result = executeAction(action, context, idx, resumeContext = null)) {
         is ActionResult.Continue -> continue
+        is ActionResult.Pause ->
+          return ActionResult.Pause(
+            attachResumeActions(result.pending, actions, idx),
+          )
         is ActionResult.StopSequence,
-        is ActionResult.Pause,
         is ActionResult.Exit,
         -> return result
       }
     }
     return ActionResult.Continue
+  }
+
+  private fun buildResumeActions(
+    actions: List<InteractionAction>,
+    pausedIndex: Int,
+    pendingKind: FlowPendingActionKind,
+  ): List<InteractionAction> {
+    val resumeIndex = if (pendingKind == FlowPendingActionKind.DELAY) pausedIndex + 1 else pausedIndex
+    if (resumeIndex <= 0) return actions
+    if (resumeIndex >= actions.size) return emptyList()
+    return actions.drop(resumeIndex)
+  }
+
+  private fun attachResumeActions(
+    pending: FlowPendingAction,
+    actions: List<InteractionAction>,
+    pausedIndex: Int,
+  ): FlowPendingAction {
+    val trailingActions =
+      if (pausedIndex + 1 >= actions.size) {
+        emptyList()
+      } else {
+        actions.drop(pausedIndex + 1)
+      }
+    val resumeActions =
+      pending.resumeActions?.let { existing ->
+        if (trailingActions.isEmpty()) existing else existing + trailingActions
+      } ?: buildResumeActions(actions, pausedIndex, pending.kind)
+    return pending.copy(
+      resumeActions = resumeActions,
+    )
   }
 
   private suspend fun dispatchDidSetTrigger(

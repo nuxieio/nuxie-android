@@ -275,6 +275,7 @@ sealed interface InteractionAction {
     val endTime: String,
     val timezone: String,
     val daysOfWeek: List<Int>? = null,
+    val successActions: List<InteractionAction>? = null,
   ) : InteractionAction
 
   @Serializable
@@ -479,6 +480,15 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
         put("timezone", value.timezone)
         if (value.daysOfWeek != null) {
           putJsonArray("daysOfWeek") { value.daysOfWeek.forEach { add(JsonPrimitive(it)) } }
+        }
+        if (value.successActions != null) {
+          put(
+            "successActions",
+            output.json.encodeToJsonElement(
+              ListSerializer(InteractionActionSerializer),
+              value.successActions,
+            ),
+          )
         }
       }
       is InteractionAction.WaitUntil -> encodeWithType("wait_until") {
