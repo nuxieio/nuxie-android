@@ -181,4 +181,80 @@ class GoalEvaluatorTest {
     assertTrue(result.met)
     assertEquals(now, result.atEpochMillis)
   }
+
+  @Test
+  fun eventOnlyAttributeGoalUsesEventTimeSemanticsAfterWindowEnd() = runBlocking {
+    val history = InMemoryEventHistoryStore()
+    val anchor = 10_000L
+    val afterWindow = 20_000L
+
+    history.insert(
+      StoredEvent(
+        id = "e1",
+        name = "\$purchase_completed",
+        distinctId = "user_1",
+        timestampEpochMillis = 11_000L,
+        properties = mapOf("journey_id" to "journey_1"),
+      )
+    )
+    history.insert(
+      StoredEvent(
+        id = "e2",
+        name = "\$restore_completed",
+        distinctId = "user_1",
+        timestampEpochMillis = 11_500L,
+        properties = mapOf("journey_id" to "journey_1"),
+      )
+    )
+
+    val evaluator = DefaultGoalEvaluator(
+      loadEventsForUser = { distinctId, limit -> history.getEventsForUser(distinctId, limit) },
+      segmentQueries = FakeSegments(emptySet()),
+      featureQueries = null,
+      userProps = null,
+      eventQueries = null,
+      irRuntime = IRRuntime { afterWindow },
+      nowEpochMillis = { afterWindow },
+    )
+
+    val expr = IREnvelope(
+      irVersion = 1,
+      expr = IRExpr.And(
+        listOf(
+          IRExpr.EventsExists(
+            name = "\$purchase_completed",
+            whereExpr = IRExpr.Pred(
+              op = "eq",
+              key = "journey_id",
+              value = IRExpr.JourneyId,
+            ),
+          ),
+          IRExpr.EventsExists(
+            name = "\$restore_completed",
+            whereExpr = IRExpr.Pred(
+              op = "eq",
+              key = "journey_id",
+              value = IRExpr.JourneyId,
+            ),
+          ),
+        ),
+      ),
+    )
+
+    val goal = GoalConfig(kind = GoalConfig.Kind.ATTRIBUTE, attributeExpr = expr, window = 2.0)
+    val camp = campaign(goal)
+    val journey = Journey(
+      campaign = camp,
+      distinctId = "user_1",
+      id = "journey_1",
+      nowEpochMillis = anchor,
+    ).apply {
+      conversionAnchorAtEpochMillis = anchor
+      conversionWindowSeconds = 2.0
+    }
+
+    val result = evaluator.isGoalMet(journey, camp)
+    assertTrue(result.met)
+    assertEquals(11_500L, result.atEpochMillis)
+  }
 }
