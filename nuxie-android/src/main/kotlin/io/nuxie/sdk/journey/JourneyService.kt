@@ -113,6 +113,7 @@ class JourneyService(
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
   private val flowRunners: MutableMap<String, FlowJourneyRunner> = mutableMapOf()
   private val runtimeDelegates: MutableMap<String, FlowRuntimeDelegateAdapter> = mutableMapOf()
+  private val presentedJourneyIds: MutableSet<String> = mutableSetOf()
   private val activeTasks: MutableMap<String, Job> = mutableMapOf()
   private var segmentMonitoringJob: Job? = null
 
@@ -202,10 +203,12 @@ class JourneyService(
     for (journey in activeJourneys) {
       val campaign = campaigns.firstOrNull { it.id == journey.campaignId } ?: continue
       evaluateGoalIfNeeded(journey, campaign)
-      val exit = exitDecision(journey, campaign)
-      if (exit != null) {
-        completeJourney(journey, exit)
-        continue
+      if (!shouldDeferExitDecision(journey.id)) {
+        val exit = exitDecision(journey, campaign)
+        if (exit != null) {
+          completeJourney(journey, exit)
+          continue
+        }
       }
 
       val pending = journey.flowState.pendingAction
@@ -243,9 +246,11 @@ class JourneyService(
     for (journey in journeys) {
       val campaign = campaigns.firstOrNull { it.id == journey.campaignId } ?: continue
       evaluateGoalIfNeeded(journey, campaign)
-      val exit = exitDecision(journey, campaign)
-      if (exit != null) {
-        completeJourney(journey, exit)
+      if (!shouldDeferExitDecision(journey.id)) {
+        val exit = exitDecision(journey, campaign)
+        if (exit != null) {
+          completeJourney(journey, exit)
+        }
       }
     }
   }
@@ -279,6 +284,7 @@ class JourneyService(
 
     val view = flowService.getFlowView(activity, flowId, runtimeDelegate = delegate)
     delegate.attachFlowView(view)
+    presentedJourneyIds += journeyId
     flowRunners[journeyId]?.attach(delegate)
     return view
   }
@@ -385,6 +391,7 @@ class JourneyService(
   suspend fun handleRuntimeDismiss(journeyId: String, reason: io.nuxie.sdk.flows.CloseReason) {
     val journey = inMemoryJourneysById[journeyId] ?: return
     val runner = flowRunners[journeyId] ?: return
+    presentedJourneyIds.remove(journeyId)
 
     val method = when (reason) {
       io.nuxie.sdk.flows.CloseReason.UserDismissed -> "user"
@@ -422,7 +429,19 @@ class JourneyService(
       error = callbackError,
     )
 
-    if (!runner.hasPendingWork()) {
+    if (journey.status.isLive) {
+      val campaign = getCampaign(journey.campaignId, journey.distinctId)
+      if (campaign != null) {
+        evaluateGoalIfNeeded(journey, campaign)
+        val exit = exitDecision(journey, campaign)
+        if (exit != null) {
+          completeJourney(journey, exit)
+          return
+        }
+      }
+    }
+
+    if (journey.status.isLive && !runner.hasPendingWork()) {
       val exitReason = when (reason) {
         io.nuxie.sdk.flows.CloseReason.UserDismissed -> JourneyExitReason.DISMISSED
         is io.nuxie.sdk.flows.CloseReason.Error -> JourneyExitReason.ERROR
@@ -658,6 +677,7 @@ class JourneyService(
 
     val shown = presentFlow(campaign.flowId, journey.id)
     if (shown) {
+      presentedJourneyIds += journey.id
       eventService.track(
         JourneyEvents.flowShown,
         properties = JourneyEvents.flowShownProperties(flowId = campaign.flowId, journey = journey)
@@ -776,6 +796,7 @@ class JourneyService(
     }
 
     cancelTasksForJourney(journey.id)
+    presentedJourneyIds.remove(journey.id)
     flowRunners.remove(journey.id)
     runtimeDelegates.remove(journey.id)
     inMemoryJourneysById.remove(journey.id)
@@ -836,6 +857,10 @@ class JourneyService(
       }
     }
     return null
+  }
+
+  private fun shouldDeferExitDecision(journeyId: String): Boolean {
+    return presentedJourneyIds.contains(journeyId)
   }
 
   private suspend fun shouldTriggerFromEvent(campaign: Campaign, event: NuxieEvent): Boolean {

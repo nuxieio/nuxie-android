@@ -208,7 +208,7 @@ class Journey(
         "last_flow_shown" -> ConversionAnchor.LAST_FLOW_SHOWN
         "last_flow_interaction" -> ConversionAnchor.LAST_FLOW_INTERACTION
         "journey_start" -> ConversionAnchor.JOURNEY_START
-        else -> ConversionAnchor.JOURNEY_START
+        else -> ConversionAnchor.LAST_FLOW_SHOWN
       }
     }
 

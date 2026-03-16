@@ -125,18 +125,12 @@ enum class ConversionAnchor {
 }
 
 object ConversionWindowDefaults {
-  /** 21 days */
-  const val PAYWALL_WINDOW_SECONDS: Double = 21.0 * 24.0 * 60.0 * 60.0
+  /** 14 days */
+  const val DEFAULT_WINDOW_SECONDS: Double = 14.0 * 24.0 * 60.0 * 60.0
 
-  /** 10 days */
-  const val ONBOARDING_WINDOW_SECONDS: Double = 10.0 * 24.0 * 60.0 * 60.0
-
+  @Suppress("UNUSED_PARAMETER")
   fun defaultWindowSeconds(campaignType: String?): Double {
-    return when (campaignType?.lowercase()) {
-      "paywall" -> PAYWALL_WINDOW_SECONDS
-      "onboarding" -> ONBOARDING_WINDOW_SECONDS
-      else -> PAYWALL_WINDOW_SECONDS
-    }
+    return DEFAULT_WINDOW_SECONDS
   }
 }
 
@@ -155,4 +149,3 @@ data class Campaign(
   val conversionAnchor: String? = null,
   val campaignType: String? = null,
 )
-
