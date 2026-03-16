@@ -52,4 +52,32 @@ class JourneyDefaultsTest {
 
     assertEquals(ConversionAnchor.JOURNEY_START, journey.conversionAnchor)
   }
+
+  @Test
+  fun markFlowShownRefreshesAnchorForLastFlowShownJourneys() {
+    val journey = Journey(
+      campaign = campaign(),
+      distinctId = "user_1",
+      nowEpochMillis = 1_000L,
+    )
+
+    journey.markFlowShown(nowEpochMillis = 5_000L)
+
+    assertEquals(5_000L, journey.conversionAnchorAtEpochMillis)
+    assertEquals(5_000L, journey.updatedAtEpochMillis)
+  }
+
+  @Test
+  fun markFlowShownLeavesOtherAnchorsUntouched() {
+    val journey = Journey(
+      campaign = campaign(conversionAnchor = "journey_start"),
+      distinctId = "user_1",
+      nowEpochMillis = 1_000L,
+    )
+
+    journey.markFlowShown(nowEpochMillis = 5_000L)
+
+    assertEquals(1_000L, journey.conversionAnchorAtEpochMillis)
+    assertEquals(1_000L, journey.updatedAtEpochMillis)
+  }
 }

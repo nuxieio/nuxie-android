@@ -677,7 +677,9 @@ class JourneyService(
 
     val shown = presentFlow(campaign.flowId, journey.id)
     if (shown) {
+      journey.markFlowShown(nowEpochMillis())
       presentedJourneyIds += journey.id
+      persistJourney(journey)
       eventService.track(
         JourneyEvents.flowShown,
         properties = JourneyEvents.flowShownProperties(flowId = campaign.flowId, journey = journey)

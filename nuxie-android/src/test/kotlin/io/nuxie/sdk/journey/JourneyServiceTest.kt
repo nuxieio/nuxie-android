@@ -173,6 +173,27 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun handleEventForTrigger_updatesLastFlowShownAnchorWhenFlowPresents() = runBlocking {
+    var now = 1_000L
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      nowEpochMillis = { now },
+      beforePresentFlow = { _, _ -> now = 5_000L },
+    )
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_anchor", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      assertEquals(5_000L, started.journey.conversionAnchorAtEpochMillis)
+      assertEquals(5_000L, started.journey.updatedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun completion_emitsJourneyUpdateToBroker() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.EveryTime)
     try {
@@ -732,6 +753,9 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
+    nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+    beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
+    presentFlowResult: Boolean = true,
     onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
     onPurchaseRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, productId: String, placementIndex: Any?) -> Unit = { _, _, _, _, _ -> },
     onRestoreRequested: suspend (journeyId: String, campaignId: String?, screenId: String?) -> Unit = { _, _, _ -> },
@@ -832,9 +856,11 @@ class JourneyServiceTest {
       journeyStore = journeyStore,
       triggerBroker = broker,
       irRuntime = irRuntime,
+      nowEpochMillis = nowEpochMillis,
       presentFlow = { flowId, journeyId ->
+        beforePresentFlow(flowId, journeyId)
         presented += flowId to journeyId
-        true
+        presentFlowResult
       },
       onCallDelegate = onCallDelegate,
       onPurchaseRequested = onPurchaseRequested,
