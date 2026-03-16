@@ -189,6 +189,12 @@ class Journey(
     updatedAtEpochMillis = nowEpochMillis
   }
 
+  fun markFlowShown(nowEpochMillis: Long = System.currentTimeMillis()) {
+    if (conversionAnchor != ConversionAnchor.LAST_FLOW_SHOWN) return
+    conversionAnchorAtEpochMillis = nowEpochMillis
+    updatedAtEpochMillis = nowEpochMillis
+  }
+
   fun setContext(key: String, value: Any?, nowEpochMillis: Long = System.currentTimeMillis()) {
     context[key] = toJsonElement(value)
     updatedAtEpochMillis = nowEpochMillis
@@ -209,7 +215,7 @@ class Journey(
         "last_flow_shown" -> ConversionAnchor.LAST_FLOW_SHOWN
         "last_flow_interaction" -> ConversionAnchor.LAST_FLOW_INTERACTION
         "journey_start" -> ConversionAnchor.JOURNEY_START
-        else -> ConversionAnchor.JOURNEY_START
+        else -> ConversionAnchor.LAST_FLOW_SHOWN
       }
     }
 

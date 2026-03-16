@@ -4,9 +4,12 @@ import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
 import io.nuxie.sdk.campaigns.EventTriggerConfig
+import io.nuxie.sdk.campaigns.ExitPolicy
+import io.nuxie.sdk.campaigns.GoalConfig
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
+import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
 import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
@@ -42,6 +45,7 @@ import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
 import io.nuxie.sdk.triggers.DefaultTriggerBroker
+import io.nuxie.sdk.triggers.JourneyExitReason
 import io.nuxie.sdk.triggers.SuppressReason
 import io.nuxie.sdk.triggers.TriggerUpdate
 import kotlinx.coroutines.CoroutineScope
@@ -169,6 +173,27 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun handleEventForTrigger_updatesLastFlowShownAnchorWhenFlowPresents() = runBlocking {
+    var now = 1_000L
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      nowEpochMillis = { now },
+      beforePresentFlow = { _, _ -> now = 5_000L },
+    )
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_anchor", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      assertEquals(5_000L, started.journey.conversionAnchorAtEpochMillis)
+      assertEquals(5_000L, started.journey.updatedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun completion_emitsJourneyUpdateToBroker() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.EveryTime)
     try {
@@ -187,7 +212,96 @@ class JourneyServiceTest {
       assertTrue(updates.any { it is TriggerUpdate.Journey })
       val journeyUpdate = updates.filterIsInstance<TriggerUpdate.Journey>().first().journey
       assertEquals(started.journey.id, journeyUpdate.journeyId)
-      assertEquals(io.nuxie.sdk.triggers.JourneyExitReason.COMPLETED, journeyUpdate.exitReason)
+      assertEquals(io.nuxie.sdk.triggers.JourneyExitReason.DISMISSED, journeyUpdate.exitReason)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun goalMetDuringPresentedFlow_defersExitUntilDismiss() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = "goal_event",
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+
+      val updates = mutableListOf<TriggerUpdate>()
+      harness.broker.register("evt_origin") { updates += it }
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_origin", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.eventService.track("goal_event")
+      delay(80)
+      val goalEvent = NuxieEvent(id = "evt_goal", name = "goal_event", distinctId = "user_1")
+      harness.service.handleEventForTrigger(goalEvent)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertNotNull(active.first().convertedAtEpochMillis)
+      assertTrue(updates.none { it is TriggerUpdate.Journey })
+
+      harness.service.handleRuntimeDismiss(started.journey.id, CloseReason.UserDismissed)
+      delay(80)
+
+      val journeyUpdate = updates.filterIsInstance<TriggerUpdate.Journey>().firstOrNull()
+      assertNotNull(journeyUpdate)
+      assertEquals(JourneyExitReason.GOAL_MET, journeyUpdate?.journey?.exitReason)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun dismissTriggeredGoalEvent_exitsAsGoalMetAfterDismissProcessing() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = mapOf(
+        "__global__" to listOf(
+          Interaction(
+            id = "dismiss_goal",
+            trigger = InteractionTrigger.Event(eventName = SystemEventNames.screenDismissed),
+            actions = listOf(
+              InteractionAction.SendEvent(eventName = "goal_event")
+            ),
+            enabled = true,
+          )
+        )
+      ),
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = "goal_event",
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+
+      val updates = mutableListOf<TriggerUpdate>()
+      harness.broker.register("evt_origin") { updates += it }
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_origin", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeDismiss(started.journey.id, CloseReason.UserDismissed)
+      delay(80)
+
+      val journeyUpdate = updates.filterIsInstance<TriggerUpdate.Journey>().firstOrNull()
+      assertNotNull(journeyUpdate)
+      assertEquals(JourneyExitReason.GOAL_MET, journeyUpdate?.journey?.exitReason)
+      assertTrue(journeyUpdate?.journey?.goalMet == true)
+      assertNotNull(journeyUpdate?.journey?.goalMetAtEpochMillis)
     } finally {
       harness.close()
     }
@@ -624,6 +738,7 @@ class JourneyServiceTest {
   private data class Harness(
     val scope: CoroutineScope,
     val service: JourneyService,
+    val eventService: EventService,
     val broker: DefaultTriggerBroker,
     val presented: MutableList<Pair<String, String>>,
     val campaigns: List<Campaign>,
@@ -636,6 +751,11 @@ class JourneyServiceTest {
   private fun newHarness(
     reentry: CampaignReentry,
     interactions: Map<String, List<Interaction>> = emptyMap(),
+    goal: GoalConfig? = null,
+    exitPolicy: ExitPolicy? = null,
+    nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+    beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
+    presentFlowResult: Boolean = true,
     onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
     onPurchaseRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, productId: String, placementIndex: Any?) -> Unit = { _, _, _, _, _ -> },
     onRestoreRequested: suspend (journeyId: String, campaignId: String?, screenId: String?) -> Unit = { _, _, _ -> },
@@ -656,8 +776,8 @@ class JourneyServiceTest {
       reentry = reentry,
       publishedAt = "2026-01-01T00:00:00Z",
       trigger = CampaignTrigger.Event(EventTriggerConfig(eventName = "paywall_trigger")),
-      goal = null,
-      exitPolicy = null,
+      goal = goal,
+      exitPolicy = exitPolicy,
       conversionAnchor = null,
       campaignType = null,
     )
@@ -736,9 +856,11 @@ class JourneyServiceTest {
       journeyStore = journeyStore,
       triggerBroker = broker,
       irRuntime = irRuntime,
+      nowEpochMillis = nowEpochMillis,
       presentFlow = { flowId, journeyId ->
+        beforePresentFlow(flowId, journeyId)
         presented += flowId to journeyId
-        true
+        presentFlowResult
       },
       onCallDelegate = onCallDelegate,
       onPurchaseRequested = onPurchaseRequested,
@@ -751,6 +873,7 @@ class JourneyServiceTest {
     return Harness(
       scope = scope,
       service = service,
+      eventService = eventService,
       broker = broker,
       presented = presented,
       campaigns = listOf(campaign),

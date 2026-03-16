@@ -1263,6 +1263,7 @@ class FlowJourneyRunner(
 
   private fun mapExitReason(reason: String?): JourneyExitReason {
     return when (reason?.lowercase()) {
+      "dismissed" -> JourneyExitReason.DISMISSED
       "goal_met" -> JourneyExitReason.GOAL_MET
       "trigger_unmatched" -> JourneyExitReason.TRIGGER_UNMATCHED
       "expired" -> JourneyExitReason.EXPIRED

@@ -61,6 +61,9 @@ enum class JourneyExitReason {
   @SerialName("completed")
   COMPLETED,
 
+  @SerialName("dismissed")
+  DISMISSED,
+
   @SerialName("goal_met")
   GOAL_MET,
 
