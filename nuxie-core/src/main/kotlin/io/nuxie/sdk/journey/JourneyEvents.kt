@@ -288,6 +288,7 @@ object JourneyEvents {
   private fun exitReasonValue(reason: JourneyExitReason): String {
     return when (reason) {
       JourneyExitReason.COMPLETED -> "completed"
+      JourneyExitReason.DISMISSED -> "dismissed"
       JourneyExitReason.GOAL_MET -> "goal_met"
       JourneyExitReason.TRIGGER_UNMATCHED -> "trigger_unmatched"
       JourneyExitReason.EXPIRED -> "expired"
@@ -296,4 +297,3 @@ object JourneyEvents {
     }
   }
 }
-

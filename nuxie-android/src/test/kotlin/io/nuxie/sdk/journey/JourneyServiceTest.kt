@@ -187,7 +187,7 @@ class JourneyServiceTest {
       assertTrue(updates.any { it is TriggerUpdate.Journey })
       val journeyUpdate = updates.filterIsInstance<TriggerUpdate.Journey>().first().journey
       assertEquals(started.journey.id, journeyUpdate.journeyId)
-      assertEquals(io.nuxie.sdk.triggers.JourneyExitReason.COMPLETED, journeyUpdate.exitReason)
+      assertEquals(io.nuxie.sdk.triggers.JourneyExitReason.DISMISSED, journeyUpdate.exitReason)
     } finally {
       harness.close()
     }

@@ -423,7 +423,13 @@ class JourneyService(
     )
 
     if (!runner.hasPendingWork()) {
-      completeJourney(journey, JourneyExitReason.COMPLETED)
+      val exitReason = when (reason) {
+        io.nuxie.sdk.flows.CloseReason.UserDismissed -> JourneyExitReason.DISMISSED
+        is io.nuxie.sdk.flows.CloseReason.Error -> JourneyExitReason.ERROR
+        io.nuxie.sdk.flows.CloseReason.PurchaseCompleted,
+        io.nuxie.sdk.flows.CloseReason.Timeout -> JourneyExitReason.COMPLETED
+      }
+      completeJourney(journey, exitReason)
     }
   }
 
@@ -988,6 +994,7 @@ class JourneyService(
   private fun exitReasonString(reason: JourneyExitReason): String {
     return when (reason) {
       JourneyExitReason.COMPLETED -> "completed"
+      JourneyExitReason.DISMISSED -> "dismissed"
       JourneyExitReason.GOAL_MET -> "goal_met"
       JourneyExitReason.TRIGGER_UNMATCHED -> "trigger_unmatched"
       JourneyExitReason.EXPIRED -> "expired"
