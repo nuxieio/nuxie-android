@@ -5,6 +5,8 @@ import io.nuxie.sdk.campaigns.GoalConfig
 import io.nuxie.sdk.events.NuxieEvent
 import io.nuxie.sdk.events.store.StoredEvent
 import io.nuxie.sdk.ir.IREventQueries
+import io.nuxie.sdk.ir.IREnvelope
+import io.nuxie.sdk.ir.IRExpr
 import io.nuxie.sdk.ir.IRFeatureQueries
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
@@ -18,6 +20,17 @@ data class GoalMetResult(
 
 interface GoalEvaluator {
   suspend fun isGoalMet(journey: Journey, campaign: Campaign): GoalMetResult
+}
+
+private data class EventOnlyAttributeEvaluation(
+  val met: Boolean,
+  val atEpochMillis: Long? = null,
+)
+
+private class EventHistoryCache(
+  initialEvents: List<StoredEvent>? = null,
+) {
+  var events: List<StoredEvent>? = initialEvents
 }
 
 /**
@@ -58,58 +71,13 @@ class DefaultGoalEvaluator(
     // If already latched by JourneyService, trust that.
     journey.convertedAtEpochMillis?.let { return GoalMetResult(met = true, atEpochMillis = it) }
 
-    val windowEndMs = if (journey.conversionWindowSeconds > 0) {
-      anchorEpochMillis + (journey.conversionWindowSeconds * 1000.0).toLong()
-    } else {
-      null
-    }
-
-    // Fast path: no filter (just check for existence within the window).
-    val filter = goal.eventFilter
-    if (filter == null) {
-      val last = getLastEventTime(
-        name = eventName,
-        distinctId = journey.distinctId,
-        sinceEpochMillis = anchorEpochMillis,
-        untilEpochMillis = windowEndMs,
-      )
-      return if (last != null) GoalMetResult(met = true, atEpochMillis = last) else GoalMetResult(met = false)
-    }
-
-    val allEvents = loadEventsForUser(journey.distinctId, 1_000)
-    val matching = allEvents.asSequence()
-      .filter { it.name == eventName }
-      .filter { ev ->
-        if (ev.timestampEpochMillis < anchorEpochMillis) return@filter false
-        if (windowEndMs != null && ev.timestampEpochMillis > windowEndMs) return@filter false
-        true
-      }
-      .sortedByDescending { it.timestampEpochMillis }
-      .toList()
-
-    for (ev in matching) {
-      val nuxieEvent = NuxieEvent(
-        id = ev.id,
-        name = ev.name,
-        distinctId = ev.distinctId,
-        properties = ev.properties,
-        timestamp = Iso8601.formatEpochMillis(ev.timestampEpochMillis),
-      )
-
-      val ok = irRuntime.eval(
-        filter,
-        IRRuntime.Config(
-          event = nuxieEvent,
-          journeyId = journey.id,
-        )
-      )
-
-      if (ok) {
-        return GoalMetResult(met = true, atEpochMillis = ev.timestampEpochMillis)
-      }
-    }
-
-    return GoalMetResult(met = false)
+    val last = findLastMatchingEventTime(
+      name = eventName,
+      filter = goal.eventFilter,
+      journey = journey,
+      anchorEpochMillis = anchorEpochMillis,
+    )
+    return if (last != null) GoalMetResult(met = true, atEpochMillis = last) else GoalMetResult(met = false)
   }
 
   private suspend fun evaluateSegmentEnterGoal(
@@ -154,6 +122,18 @@ class DefaultGoalEvaluator(
   ): GoalMetResult {
     val expr = goal.attributeExpr ?: return GoalMetResult(met = false)
 
+    evaluateEventOnlyAttributeExpr(
+      expr = expr.expr,
+      journey = journey,
+      anchorEpochMillis = anchorEpochMillis,
+    )?.let { result ->
+      return if (result.met) {
+        GoalMetResult(met = true, atEpochMillis = result.atEpochMillis)
+      } else {
+        GoalMetResult(met = false)
+      }
+    }
+
     val now = nowEpochMillis()
     if (journey.conversionWindowSeconds > 0) {
       val end = anchorEpochMillis + (journey.conversionWindowSeconds * 1000.0).toLong()
@@ -173,6 +153,146 @@ class DefaultGoalEvaluator(
     )
 
     return if (ok) GoalMetResult(met = true, atEpochMillis = now) else GoalMetResult(met = false)
+  }
+
+  private fun windowEndEpochMillis(
+    journey: Journey,
+    anchorEpochMillis: Long,
+  ): Long? {
+    return if (journey.conversionWindowSeconds > 0) {
+      anchorEpochMillis + (journey.conversionWindowSeconds * 1000.0).toLong()
+    } else {
+      null
+    }
+  }
+
+  private suspend fun findLastMatchingEventTime(
+    name: String,
+    filter: IREnvelope?,
+    journey: Journey,
+    anchorEpochMillis: Long,
+    allEvents: List<StoredEvent>? = null,
+  ): Long? {
+    val windowEndMs = windowEndEpochMillis(journey, anchorEpochMillis)
+
+    if (filter == null) {
+      return getLastEventTime(
+        name = name,
+        distinctId = journey.distinctId,
+        sinceEpochMillis = anchorEpochMillis,
+        untilEpochMillis = windowEndMs,
+      )
+    }
+
+    val matchingEvents = (allEvents ?: loadEventsForUser(journey.distinctId, 1_000)).asSequence()
+      .filter { it.name == name }
+      .filter { ev ->
+        if (ev.timestampEpochMillis < anchorEpochMillis) return@filter false
+        if (windowEndMs != null && ev.timestampEpochMillis > windowEndMs) return@filter false
+        true
+      }
+      .sortedByDescending { it.timestampEpochMillis }
+      .toList()
+
+    for (ev in matchingEvents) {
+      val nuxieEvent = NuxieEvent(
+        id = ev.id,
+        name = ev.name,
+        distinctId = ev.distinctId,
+        properties = ev.properties,
+        timestamp = Iso8601.formatEpochMillis(ev.timestampEpochMillis),
+      )
+
+      val ok = irRuntime.eval(
+        filter,
+        IRRuntime.Config(
+          event = nuxieEvent,
+          journeyId = journey.id,
+        )
+      )
+
+      if (ok) {
+        return ev.timestampEpochMillis
+      }
+    }
+
+    return null
+  }
+
+  private suspend fun evaluateEventOnlyAttributeExpr(
+    expr: IRExpr,
+    journey: Journey,
+    anchorEpochMillis: Long,
+    eventCache: EventHistoryCache = EventHistoryCache(),
+  ): EventOnlyAttributeEvaluation? {
+    suspend fun getCachedEvents(): List<StoredEvent> {
+      val existing = eventCache.events
+      if (existing != null) return existing
+      return loadEventsForUser(journey.distinctId, 1_000).also {
+        eventCache.events = it
+      }
+    }
+
+    return when (expr) {
+      is IRExpr.And -> {
+        val results = expr.args.map { child ->
+          evaluateEventOnlyAttributeExpr(
+            expr = child,
+            journey = journey,
+            anchorEpochMillis = anchorEpochMillis,
+            eventCache = eventCache,
+          ) ?: return null
+        }
+        if (results.all { it.met }) {
+          EventOnlyAttributeEvaluation(
+            met = true,
+            atEpochMillis = results.mapNotNull { it.atEpochMillis }.maxOrNull(),
+          )
+        } else {
+          EventOnlyAttributeEvaluation(met = false)
+        }
+      }
+
+      is IRExpr.Or -> {
+        val results = expr.args.map { child ->
+          evaluateEventOnlyAttributeExpr(
+            expr = child,
+            journey = journey,
+            anchorEpochMillis = anchorEpochMillis,
+            eventCache = eventCache,
+          ) ?: return null
+        }
+        val metTimes = results.filter { it.met }.mapNotNull { it.atEpochMillis }
+        if (metTimes.isNotEmpty()) {
+          EventOnlyAttributeEvaluation(
+            met = true,
+            atEpochMillis = metTimes.minOrNull(),
+          )
+        } else {
+          EventOnlyAttributeEvaluation(met = false)
+        }
+      }
+
+      is IRExpr.EventsExists -> {
+        if (expr.since != null || expr.until != null || expr.within != null) {
+          return null
+        }
+        val last = findLastMatchingEventTime(
+          name = expr.name,
+          filter = IREnvelope(irVersion = 1, expr = expr.whereExpr ?: IRExpr.Bool(true)),
+          journey = journey,
+          anchorEpochMillis = anchorEpochMillis,
+          allEvents = getCachedEvents(),
+        )
+        if (last != null) {
+          EventOnlyAttributeEvaluation(met = true, atEpochMillis = last)
+        } else {
+          EventOnlyAttributeEvaluation(met = false)
+        }
+      }
+
+      else -> null
+    }
   }
 
   private suspend fun getLastEventTime(
