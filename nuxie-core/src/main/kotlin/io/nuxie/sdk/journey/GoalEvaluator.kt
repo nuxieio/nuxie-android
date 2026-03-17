@@ -27,6 +27,12 @@ private data class EventOnlyAttributeEvaluation(
   val atEpochMillis: Long? = null,
 )
 
+private class EventHistoryCache(
+  initialEvents: List<StoredEvent>? = null,
+) {
+  var events: List<StoredEvent>? = initialEvents
+}
+
 /**
  * Goal evaluation for journeys.
  *
@@ -217,9 +223,16 @@ class DefaultGoalEvaluator(
     expr: IRExpr,
     journey: Journey,
     anchorEpochMillis: Long,
-    allEvents: List<StoredEvent>? = null,
+    eventCache: EventHistoryCache = EventHistoryCache(),
   ): EventOnlyAttributeEvaluation? {
-    val cachedEvents = allEvents ?: loadEventsForUser(journey.distinctId, 1_000)
+    suspend fun getCachedEvents(): List<StoredEvent> {
+      val existing = eventCache.events
+      if (existing != null) return existing
+      return loadEventsForUser(journey.distinctId, 1_000).also {
+        eventCache.events = it
+      }
+    }
+
     return when (expr) {
       is IRExpr.And -> {
         val results = expr.args.map { child ->
@@ -227,7 +240,7 @@ class DefaultGoalEvaluator(
             expr = child,
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
-            allEvents = cachedEvents,
+            eventCache = eventCache,
           ) ?: return null
         }
         if (results.all { it.met }) {
@@ -246,7 +259,7 @@ class DefaultGoalEvaluator(
             expr = child,
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
-            allEvents = cachedEvents,
+            eventCache = eventCache,
           ) ?: return null
         }
         val metTimes = results.filter { it.met }.mapNotNull { it.atEpochMillis }
@@ -269,7 +282,7 @@ class DefaultGoalEvaluator(
           filter = IREnvelope(irVersion = 1, expr = expr.whereExpr ?: IRExpr.Bool(true)),
           journey = journey,
           anchorEpochMillis = anchorEpochMillis,
-          allEvents = cachedEvents,
+          allEvents = getCachedEvents(),
         )
         if (last != null) {
           EventOnlyAttributeEvaluation(met = true, atEpochMillis = last)
