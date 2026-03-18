@@ -1,7 +1,7 @@
 package io.nuxie.sdk.flows
 
-import android.app.Activity
 import android.os.Bundle
+import androidx.activity.ComponentActivity
 import io.nuxie.sdk.NuxieSDK
 import io.nuxie.sdk.logging.NuxieLogger
 import kotlinx.coroutines.CoroutineScope
@@ -10,7 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-class NuxieFlowActivity : Activity() {
+class NuxieFlowActivity : ComponentActivity() {
   companion object {
     const val EXTRA_FLOW_ID: String = "io.nuxie.sdk.extra.FLOW_ID"
     const val EXTRA_JOURNEY_ID: String = "io.nuxie.sdk.extra.JOURNEY_ID"

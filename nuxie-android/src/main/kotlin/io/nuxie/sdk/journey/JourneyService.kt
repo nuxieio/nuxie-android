@@ -353,6 +353,10 @@ class JourneyService(
         runtimeDelegates[journeyId]?.performRestore()
       }
 
+      "action/request_notifications" -> {
+        runtimeDelegates[journeyId]?.performRequestNotifications(journey.id)
+      }
+
       "action/open_link" -> {
         val screenId = payload.string("screenId") ?: journey.flowState.currentScreenId
         val instanceId = payload.string("instanceId")
@@ -1070,6 +1074,10 @@ private class FlowRuntimeDelegateAdapter(
   override suspend fun performRestore() {
     journeyService.dispatchRestoreRequested(journeyId)
     flowView?.performRestore()
+  }
+
+  override suspend fun performRequestNotifications(journeyId: String?) {
+    flowView?.performRequestNotifications(journeyId)
   }
 
   override suspend fun performOpenLink(url: String, target: String?) {

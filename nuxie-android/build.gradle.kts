@@ -37,7 +37,9 @@ android {
 dependencies {
   api(project(":nuxie-core"))
 
+  implementation("androidx.activity:activity-ktx:1.9.3")
   implementation("androidx.annotation:annotation:1.8.2")
+  implementation("androidx.core:core-ktx:1.13.1")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
   implementation("androidx.room:room-runtime:2.6.1")
   implementation("androidx.room:room-ktx:2.6.1")

@@ -1,9 +1,13 @@
 package io.nuxie.sdk.flows
 
+import android.Manifest
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
@@ -12,6 +16,13 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import io.nuxie.sdk.NuxieSDK
+import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
 import io.nuxie.sdk.purchases.PurchaseResult
@@ -27,6 +38,48 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.max
+
+internal interface NotificationPermissionHandler {
+  fun areNotificationsEnabled(context: Context): Boolean
+  fun isPostNotificationsPermissionGranted(context: Context): Boolean
+  fun requestPostNotificationsPermission(
+    activity: ComponentActivity,
+    onResult: (Boolean) -> Unit,
+  ): Boolean
+}
+
+internal class DefaultNotificationPermissionHandler : NotificationPermissionHandler {
+  override fun areNotificationsEnabled(context: Context): Boolean {
+    return NotificationManagerCompat.from(context).areNotificationsEnabled()
+  }
+
+  override fun isPostNotificationsPermissionGranted(context: Context): Boolean {
+    return ContextCompat.checkSelfPermission(
+      context,
+      Manifest.permission.POST_NOTIFICATIONS,
+    ) == PackageManager.PERMISSION_GRANTED
+  }
+
+  override fun requestPostNotificationsPermission(
+    activity: ComponentActivity,
+    onResult: (Boolean) -> Unit,
+  ): Boolean {
+    return runCatching {
+      val key = "nuxie.notifications.${System.nanoTime()}"
+      lateinit var launcher: ActivityResultLauncher<String>
+      launcher = activity.activityResultRegistry.register(
+        key,
+        ActivityResultContracts.RequestPermission(),
+      ) { granted ->
+        launcher.unregister()
+        onResult(granted)
+      }
+      launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }.onFailure {
+      NuxieLogger.warning("FlowView: Failed to request notification permission: ${it.message}", it)
+    }.isSuccess
+  }
+}
 
 class FlowView(context: Context) : FrameLayout(context) {
 
@@ -58,6 +111,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var scope: CoroutineScope? = null
   private var flow: Flow? = null
   private var bundleStore: FlowBundleStore? = null
+  internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
+  internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
+  internal var triggerEvent: (String, Map<String, Any?>?) -> Unit = { event, properties ->
+    NuxieSDK.shared().trigger(event, properties = properties)
+  }
 
   private data class SafeAreaInsets(
     val top: Int,
@@ -171,6 +229,15 @@ class FlowView(context: Context) : FrameLayout(context) {
     handleRestore()
   }
 
+  fun performRequestNotifications(journeyId: String? = null) {
+    val action = { handleRequestNotifications(journeyId) }
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      action()
+    } else {
+      post { action() }
+    }
+  }
+
   fun performOpenLink(urlString: String, target: String?) {
     openLinkInternal(urlString, target)
   }
@@ -215,6 +282,14 @@ class FlowView(context: Context) : FrameLayout(context) {
           runtimeDelegate?.onRuntimeMessage(type, payload, id)
         } else {
           handleRestore()
+        }
+      }
+
+      "action/request_notifications" -> {
+        if (runtimeDelegate != null) {
+          runtimeDelegate?.onRuntimeMessage(type, payload, id)
+        } else {
+          performRequestNotifications()
         }
       }
 
@@ -415,6 +490,80 @@ class FlowView(context: Context) : FrameLayout(context) {
         )
       }
     }
+  }
+
+  private fun handleRequestNotifications(journeyId: String?) {
+    val properties = buildNotificationEventProperties(journeyId)
+    val emitEnabled = { emitNotificationPermissionEvent(SystemEventNames.notificationsEnabled, properties) }
+    val emitDenied = { emitNotificationPermissionEvent(SystemEventNames.notificationsDenied, properties) }
+
+    if (sdkIntProvider() < Build.VERSION_CODES.TIRAMISU) {
+      if (notificationPermissionHandler.areNotificationsEnabled(context)) {
+        emitEnabled()
+      } else {
+        emitDenied()
+      }
+      return
+    }
+
+    val notificationsEnabled = notificationPermissionHandler.areNotificationsEnabled(context)
+    val permissionGranted = notificationPermissionHandler.isPostNotificationsPermissionGranted(context)
+
+    if (permissionGranted && notificationsEnabled) {
+      emitEnabled()
+      return
+    }
+
+    if (!permissionGranted) {
+      val activity = findComponentActivity(context)
+      if (activity == null) {
+        NuxieLogger.warning(
+          "FlowView: Notification permission prompt requires a ComponentActivity host; emitting denied",
+        )
+        emitDenied()
+        return
+      }
+      val launched = notificationPermissionHandler.requestPostNotificationsPermission(activity) { granted ->
+        val enabledAfterResult = notificationPermissionHandler.areNotificationsEnabled(context)
+        if (granted && enabledAfterResult) {
+          emitEnabled()
+        } else {
+          emitDenied()
+        }
+      }
+      if (!launched) {
+        emitDenied()
+      }
+      return
+    }
+
+    emitDenied()
+  }
+
+  private fun buildNotificationEventProperties(journeyId: String?): Map<String, Any?>? {
+    return if (journeyId.isNullOrBlank()) {
+      null
+    } else {
+      mapOf("journey_id" to journeyId)
+    }
+  }
+
+  private fun emitNotificationPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>?,
+  ) {
+    triggerEvent(eventName, properties)
+  }
+
+  private fun findComponentActivity(context: Context): ComponentActivity? {
+    var current: Context? = context
+    while (current is ContextWrapper) {
+      if (current is ComponentActivity) {
+        return current
+      }
+      current = current.baseContext
+    }
+    return current as? ComponentActivity
   }
 
   private fun openLinkInternal(urlString: String, target: String?) {

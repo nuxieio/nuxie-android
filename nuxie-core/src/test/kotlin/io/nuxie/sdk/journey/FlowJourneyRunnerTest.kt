@@ -161,6 +161,7 @@ class FlowJourneyRunnerTest {
     val shownScreens: MutableList<String> = mutableListOf()
     val purchases: MutableList<Pair<String, Any?>> = mutableListOf()
     var restores: Int = 0
+    val requestNotificationJourneyIds: MutableList<String?> = mutableListOf()
     val links: MutableList<Pair<String, String?>> = mutableListOf()
     var dismissed: Int = 0
     val backs: MutableList<Pair<Int?, JsonElement?>> = mutableListOf()
@@ -180,6 +181,10 @@ class FlowJourneyRunnerTest {
 
     override suspend fun performRestore() {
       restores += 1
+    }
+
+    override suspend fun performRequestNotifications(journeyId: String?) {
+      requestNotificationJourneyIds += journeyId
     }
 
     override suspend fun performOpenLink(url: String, target: String?) {
@@ -384,6 +389,37 @@ class FlowJourneyRunnerTest {
       assertEquals(2, messages.size)
       assertTrue(messages.contains("screen_did_set"))
       assertTrue(messages.contains("global_did_set"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun requestNotificationsActionContinuesAndForwardsJourneyContext() = runBlocking {
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_notifications",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(InteractionAction.RequestNotifications),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.dispatchTrigger(
+        trigger = InteractionTrigger.Press,
+        screenId = "screen_1",
+        componentId = null,
+        instanceId = null,
+        event = null,
+      )
+      assertNull(outcome)
+      settle()
+
+      assertEquals(listOf(harness.journey.id), harness.host.requestNotificationJourneyIds)
     } finally {
       harness.close()
     }
