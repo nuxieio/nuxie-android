@@ -12,6 +12,8 @@ import androidx.test.core.app.ApplicationProvider
 import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
 import kotlinx.serialization.json.JsonObject
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -21,6 +23,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import java.util.WeakHashMap
 
 @RunWith(RobolectricTestRunner::class)
 class FlowViewNotificationPermissionTest {
@@ -164,7 +167,9 @@ class FlowViewNotificationPermissionTest {
       permissionGranted = false,
       notificationsEnabledAfterRequest = true,
     )
+    val stableViewId = R.id.nuxie_flow_view
     val flowView = FlowView(activity).apply {
+      id = stableViewId
       notificationPermissionHandler = handler
       sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
     }
@@ -177,6 +182,7 @@ class FlowViewNotificationPermissionTest {
 
     val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
     val restoredView = FlowView(activity).apply {
+      id = stableViewId
       notificationPermissionHandler = handler
       sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
       notificationPermissionEventSink = { event, properties, _ ->
@@ -202,8 +208,8 @@ class FlowViewNotificationPermissionTest {
       ),
       triggered,
     )
-    assertEquals(R.id.nuxie_flow_view, flowView.id)
-    assertEquals(R.id.nuxie_flow_view, restoredView.id)
+    assertEquals(stableViewId, flowView.id)
+    assertEquals(stableViewId, restoredView.id)
   }
 
   @Test
@@ -218,6 +224,44 @@ class FlowViewNotificationPermissionTest {
     }
 
     assertEquals(true, reboundGranted)
+  }
+
+  @Test
+  fun defaultNotificationPermissionHandler_keepsComponentActivityLauncherRegisteredBeforeLaunch() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = DefaultNotificationPermissionHandler()
+    val requestId = "req_component_activity"
+
+    val launched =
+      handler.requestPostNotificationsPermission(
+        activity = activity,
+        requestId = requestId,
+        launchIfNeeded = true,
+      ) {}
+
+    assertTrue(launched)
+
+    val field = DefaultNotificationPermissionHandler::class.java.getDeclaredField("activityResultLaunchers")
+    field.isAccessible = true
+    @Suppress("UNCHECKED_CAST")
+    val launcherMap =
+      field.get(handler) as WeakHashMap<ComponentActivity, MutableMap<String, Any?>>
+    val activityLaunchers: MutableMap<String, Any?>? = launcherMap[activity]
+
+    assertNotNull(activityLaunchers)
+    assertTrue(activityLaunchers!!.containsKey(requestId))
+  }
+
+  @Test
+  fun flowViews_useUniqueIdsByDefault() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+
+    val first = FlowView(activity)
+    val second = FlowView(activity)
+
+    assertNotEquals(View.NO_ID, first.id)
+    assertNotEquals(View.NO_ID, second.id)
+    assertNotEquals(first.id, second.id)
   }
 }
 

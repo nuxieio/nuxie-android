@@ -175,11 +175,17 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean {
+    val shouldLaunch =
+      if (launchIfNeeded) {
+        NotificationPermissionRequestRegistry.markLaunched(requestId)
+      } else {
+        false
+      }
     NotificationPermissionRequestRegistry.bind(requestId, onResult)
 
     return runCatching {
       val launcher = notificationPermissionLauncher(activity, requestId)
-      if (launchIfNeeded && NotificationPermissionRequestRegistry.markLaunched(requestId)) {
+      if (shouldLaunch) {
         launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
       }
     }.onFailure {
@@ -391,7 +397,7 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   init {
     if (id == View.NO_ID) {
-      id = R.id.nuxie_flow_view
+      id = View.generateViewId()
     }
   }
 
