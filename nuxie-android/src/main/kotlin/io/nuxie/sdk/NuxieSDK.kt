@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import androidx.activity.ComponentActivity
 import androidx.room.Room
 import io.nuxie.sdk.config.EventLinkingPolicy
 import io.nuxie.sdk.config.NuxieConfiguration
@@ -975,7 +976,7 @@ class NuxieSDK private constructor() {
   }
 
   suspend fun getFlowView(
-    activity: Activity,
+    activity: ComponentActivity,
     flowId: String,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
@@ -989,7 +990,7 @@ class NuxieSDK private constructor() {
     )
   }
 
-  internal suspend fun getFlowViewForJourney(activity: Activity, flowId: String, journeyId: String): FlowView {
+  internal suspend fun getFlowViewForJourney(activity: ComponentActivity, flowId: String, journeyId: String): FlowView {
     if (!isSetup) throw NuxieError.NotConfigured
     val svc = journeyService ?: throw NuxieError.NotConfigured
     return svc.createFlowViewForJourney(activity, flowId, journeyId)

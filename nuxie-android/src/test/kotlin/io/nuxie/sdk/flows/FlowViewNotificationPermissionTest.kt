@@ -1,6 +1,5 @@
 package io.nuxie.sdk.flows
 
-import android.app.Activity
 import android.content.Context
 import android.os.Build
 import android.os.Looper
@@ -61,31 +60,6 @@ class FlowViewNotificationPermissionTest {
   @Test
   fun requestNotifications_requestsPermissionOnComponentActivityAndEmitsEnabled() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
-    val handler = FakeNotificationPermissionHandler(
-      notificationsEnabled = false,
-      permissionGranted = false,
-      notificationsEnabledAfterRequest = true,
-    )
-    val flowView = FlowView(activity).apply {
-      notificationPermissionHandler = handler
-      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
-    }
-
-    val triggered = mutableListOf<String>()
-    flowView.notificationPermissionEventSink = { event, _, _ -> triggered += event }
-
-    flowView.performRequestNotifications("journey_1")
-    val requestId = handler.requests.single().requestId
-    handler.resolve(requestId, granted = true)
-    shadowOf(Looper.getMainLooper()).idle()
-
-    assertEquals(1, handler.requestInvocations)
-    assertEquals(listOf(SystemEventNames.notificationsEnabled), triggered)
-  }
-
-  @Test
-  fun requestNotifications_requestsPermissionOnPlainActivityHostAndEmitsEnabled() {
-    val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
     val handler = FakeNotificationPermissionHandler(
       notificationsEnabled = false,
       permissionGranted = false,
@@ -351,7 +325,7 @@ private class FakeNotificationPermissionHandler(
   }
 
   override fun requestPostNotificationsPermission(
-    activity: Activity,
+    activity: ComponentActivity,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,

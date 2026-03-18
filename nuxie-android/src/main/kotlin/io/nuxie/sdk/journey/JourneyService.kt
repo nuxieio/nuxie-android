@@ -1,6 +1,6 @@
 package io.nuxie.sdk.journey
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
@@ -280,7 +280,7 @@ class JourneyService(
     return startJourneyInternal(campaign, distinctId, originEventId)
   }
 
-  suspend fun createFlowViewForJourney(activity: Activity, flowId: String, journeyId: String): FlowView {
+  suspend fun createFlowViewForJourney(activity: ComponentActivity, flowId: String, journeyId: String): FlowView {
     val delegate = runtimeDelegates[journeyId] ?: FlowRuntimeDelegateAdapter(journeyId, this, scope).also {
       runtimeDelegates[journeyId] = it
     }

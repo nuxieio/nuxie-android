@@ -93,13 +93,13 @@ container.addView(flowView)
 
 ## Compose Hosting Example
 
-`getFlowView(...)` needs an `Activity`. In Compose, resolve activity from context and host with `AndroidView`.
+`getFlowView(...)` needs a `ComponentActivity`. In Compose, resolve the host activity from context and host with `AndroidView`.
 
 ```kotlin
 @Composable
 fun NuxieFlowContainer(flowId: String) {
   val context = LocalContext.current
-  val activity = context as? Activity ?: return
+  val activity = context as? ComponentActivity ?: return
   var flowView by remember(flowId) { mutableStateOf<FlowView?>(null) }
 
   LaunchedEffect(activity, flowId) {

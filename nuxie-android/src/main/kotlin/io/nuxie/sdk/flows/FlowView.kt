@@ -1,15 +1,12 @@
 package io.nuxie.sdk.flows
 
 import android.Manifest
-import android.app.Activity
-import android.app.Fragment
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.Parcel
 import android.os.Parcelable
 import android.os.Looper
@@ -26,6 +23,8 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import io.nuxie.sdk.NuxieSDK
 import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
@@ -52,7 +51,7 @@ internal interface NotificationPermissionHandler {
   fun areNotificationsEnabled(context: Context): Boolean
   fun isPostNotificationsPermissionGranted(context: Context): Boolean
   fun requestPostNotificationsPermission(
-    activity: Activity,
+    activity: ComponentActivity,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
@@ -131,40 +130,19 @@ internal object NotificationPermissionRequestRegistry {
   }
 }
 
-@Suppress("DEPRECATION")
 internal object FlowViewHostStateRegistry {
-  private const val TAG = "io.nuxie.sdk.flow.host.state"
-
-  fun acquireStableViewId(activity: Activity): Int {
-    return retainedFragment(activity).acquireStableViewId(activity)
-  }
-
-  private fun retainedFragment(activity: Activity): FlowViewHostStateFragment {
-    val manager = activity.fragmentManager
-    val existing = manager.findFragmentByTag(TAG) as? FlowViewHostStateFragment
-    if (existing != null) {
-      return existing
-    }
-
-    val fragment = FlowViewHostStateFragment()
-    manager.beginTransaction().add(fragment, TAG).commitAllowingStateLoss()
-    manager.executePendingTransactions()
-    return fragment
+  fun acquireStableViewId(activity: ComponentActivity): Int {
+    val viewModel = ViewModelProvider(activity)[FlowViewHostStateViewModel::class.java]
+    return viewModel.acquireStableViewId(activity)
   }
 }
 
-@Suppress("DEPRECATION")
-internal class FlowViewHostStateFragment : Fragment() {
+internal class FlowViewHostStateViewModel : ViewModel() {
   private var hostIdentityToken: Int? = null
   private var nextAllocationIndex: Int = 0
   private val stableViewIds: MutableList<Int> = mutableListOf()
 
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    retainInstance = true
-  }
-
-  fun acquireStableViewId(activity: Activity): Int {
+  fun acquireStableViewId(activity: ComponentActivity): Int {
     val currentToken = System.identityHashCode(activity)
     if (hostIdentityToken != currentToken) {
       hostIdentityToken = currentToken
@@ -195,26 +173,17 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
   }
 
   override fun requestPostNotificationsPermission(
-    activity: Activity,
+    activity: ComponentActivity,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean {
-    return if (activity is ComponentActivity) {
-      requestWithActivityResultRegistry(
-        activity = activity,
-        requestId = requestId,
-        launchIfNeeded = launchIfNeeded,
-        onResult = onResult,
-      )
-    } else {
-      LegacyNotificationPermissionFragment.request(
-        activity = activity,
-        requestId = requestId,
-        launchIfNeeded = launchIfNeeded,
-        onResult = onResult,
-      )
-    }
+    return requestWithActivityResultRegistry(
+      activity = activity,
+      requestId = requestId,
+      launchIfNeeded = launchIfNeeded,
+      onResult = onResult,
+    )
   }
 
   private fun requestWithActivityResultRegistry(
@@ -285,107 +254,6 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
     internal fun notificationPermissionActivityResultKey(requestId: String): String {
       return "io.nuxie.sdk.notifications.permission.$requestId"
     }
-  }
-}
-
-@Suppress("DEPRECATION")
-private class LegacyNotificationPermissionFragment : Fragment() {
-  private var didRequestPermission: Boolean = false
-
-  override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    didRequestPermission = savedInstanceState?.getBoolean(STATE_DID_REQUEST_PERMISSION) ?: false
-  }
-
-  override fun onResume() {
-    super.onResume()
-    requestPermissionIfNeeded()
-  }
-
-  override fun onSaveInstanceState(outState: Bundle) {
-    outState.putBoolean(STATE_DID_REQUEST_PERMISSION, didRequestPermission)
-    super.onSaveInstanceState(outState)
-  }
-
-  private fun requestPermissionIfNeeded() {
-    if (didRequestPermission || !isAdded) return
-    didRequestPermission = true
-    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
-  }
-
-  override fun onRequestPermissionsResult(
-    requestCode: Int,
-    permissions: Array<out String>,
-    grantResults: IntArray,
-  ) {
-    if (requestCode != REQUEST_CODE) {
-      super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-      return
-    }
-
-    val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-    NotificationPermissionRequestRegistry.complete(requestId(), granted)
-    activity?.fragmentManager?.beginTransaction()?.remove(this)?.commitAllowingStateLoss()
-  }
-
-  private fun requestId(): String {
-    return arguments?.getString(ARG_REQUEST_ID).orEmpty()
-  }
-
-  companion object {
-    private const val TAG_PREFIX = "io.nuxie.sdk.notifications.permission"
-    private const val REQUEST_CODE = 41073
-    private const val ARG_REQUEST_ID = "request_id"
-    private const val STATE_DID_REQUEST_PERMISSION = "did_request_permission"
-
-    fun request(
-      activity: Activity,
-      requestId: String,
-      launchIfNeeded: Boolean,
-      onResult: (Boolean) -> Unit,
-    ): Boolean {
-      if (activity.isFinishing) {
-        return false
-      }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) {
-        return false
-      }
-
-      NotificationPermissionRequestRegistry.bind(requestId, onResult)
-
-      val manager = activity.fragmentManager
-      val tag = fragmentTag(requestId)
-      if (manager.findFragmentByTag(tag) != null) {
-        return true
-      }
-
-      if (!launchIfNeeded) {
-        return NotificationPermissionRequestRegistry.hasPendingWork(requestId)
-      }
-
-      if (!NotificationPermissionRequestRegistry.markLaunched(requestId)) {
-        return true
-      }
-
-      return runCatching {
-        val fragment =
-          LegacyNotificationPermissionFragment().also {
-            it.arguments = Bundle().apply {
-              putString(ARG_REQUEST_ID, requestId)
-            }
-            manager.beginTransaction().add(it, tag).commitAllowingStateLoss()
-            manager.executePendingTransactions()
-          }
-      }.onFailure {
-        NotificationPermissionRequestRegistry.clear(requestId)
-        NuxieLogger.warning(
-          "FlowView: Failed to request notification permission from Activity host: ${it.message}",
-          it,
-        )
-      }.isSuccess
-    }
-
-    private fun fragmentTag(requestId: String): String = "$TAG_PREFIX.$requestId"
   }
 }
 
@@ -878,10 +746,10 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     if (!permissionGranted) {
-      val activity = findActivity(context)
+      val activity = findComponentActivity(context)
       if (activity == null) {
         NuxieLogger.warning(
-          "FlowView: Notification permission prompt requires an Activity host; emitting denied",
+          "FlowView: Notification permission prompt requires a ComponentActivity host; emitting denied",
         )
         emitDenied()
         return
@@ -958,20 +826,20 @@ class FlowView(context: Context) : FrameLayout(context) {
     )
   }
 
-  private fun findActivity(context: Context): Activity? {
+  private fun findComponentActivity(context: Context): ComponentActivity? {
     var current: Context? = context
     while (current is ContextWrapper) {
-      if (current is Activity) {
+      if (current is ComponentActivity) {
         return current
       }
       current = current.baseContext
     }
-    return current as? Activity
+    return current as? ComponentActivity
   }
 
   private fun rebindPendingNotificationPermissionRequestIfNeeded() {
     val requestId = pendingNotificationPermissionRequestId ?: return
-    val activity = findActivity(context) ?: return
+    val activity = findComponentActivity(context) ?: return
     notificationPermissionHandler.requestPostNotificationsPermission(
       activity = activity,
       requestId = requestId,

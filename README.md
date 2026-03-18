@@ -135,7 +135,7 @@ val flowView = sdk.getFlowView(activity = this, flowId = "flow_123")
 // Add `flowView` to your container view hierarchy.
 ```
 
-Use `getFlowView(...)` if you want to host inside your own Activity/Fragment/Compose container.
+Use `getFlowView(...)` if you want to host inside your own `ComponentActivity`/Fragment/Compose container.
 
 ## Delegate Callbacks
 
