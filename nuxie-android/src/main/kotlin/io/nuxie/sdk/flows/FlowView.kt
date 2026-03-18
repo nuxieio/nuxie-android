@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Parcel
+import android.os.Parcelable
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
@@ -42,12 +44,16 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlin.math.max
+import java.util.UUID
+import java.util.WeakHashMap
 
 internal interface NotificationPermissionHandler {
   fun areNotificationsEnabled(context: Context): Boolean
   fun isPostNotificationsPermissionGranted(context: Context): Boolean
   fun requestPostNotificationsPermission(
     activity: Activity,
+    requestId: String,
+    launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean
 }
@@ -59,7 +65,75 @@ internal interface NotificationPermissionEventReceiver {
   )
 }
 
+internal object NotificationPermissionRequestRegistry {
+  private val callbacks: MutableMap<String, (Boolean) -> Unit> = mutableMapOf()
+  private val pendingResults: MutableMap<String, Boolean> = mutableMapOf()
+  private val inFlightRequestIds: MutableSet<String> = mutableSetOf()
+  private val lock = Any()
+
+  fun bind(requestId: String, onResult: (Boolean) -> Unit) {
+    val pendingResult =
+      synchronized(lock) {
+        callbacks[requestId] = onResult
+        pendingResults.remove(requestId)
+      }
+
+    if (pendingResult != null) {
+      synchronized(lock) {
+        callbacks.remove(requestId)
+      }
+      onResult(pendingResult)
+    }
+  }
+
+  fun markLaunched(requestId: String): Boolean {
+    synchronized(lock) {
+      if (inFlightRequestIds.contains(requestId)) return false
+      inFlightRequestIds += requestId
+      return true
+    }
+  }
+
+  fun complete(requestId: String, granted: Boolean) {
+    val callback =
+      synchronized(lock) {
+        inFlightRequestIds.remove(requestId)
+        callbacks.remove(requestId).also { existing ->
+          if (existing == null) {
+            pendingResults[requestId] = granted
+          }
+        }
+      }
+    callback?.invoke(granted)
+  }
+
+  fun hasPendingWork(requestId: String): Boolean {
+    synchronized(lock) {
+      return inFlightRequestIds.contains(requestId) || pendingResults.containsKey(requestId)
+    }
+  }
+
+  fun clear(requestId: String) {
+    synchronized(lock) {
+      callbacks.remove(requestId)
+      pendingResults.remove(requestId)
+      inFlightRequestIds.remove(requestId)
+    }
+  }
+
+  internal fun resetForTest() {
+    synchronized(lock) {
+      callbacks.clear()
+      pendingResults.clear()
+      inFlightRequestIds.clear()
+    }
+  }
+}
+
 internal class DefaultNotificationPermissionHandler : NotificationPermissionHandler {
+  private val activityResultLaunchers:
+    MutableMap<ComponentActivity, MutableMap<String, ActivityResultLauncher<String>>> = WeakHashMap()
+
   override fun areNotificationsEnabled(context: Context): Boolean {
     return NotificationManagerCompat.from(context).areNotificationsEnabled()
   }
@@ -73,43 +147,112 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
 
   override fun requestPostNotificationsPermission(
     activity: Activity,
+    requestId: String,
+    launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean {
     return if (activity is ComponentActivity) {
-      requestWithActivityResultRegistry(activity, onResult)
+      requestWithActivityResultRegistry(
+        activity = activity,
+        requestId = requestId,
+        launchIfNeeded = launchIfNeeded,
+        onResult = onResult,
+      )
     } else {
-      LegacyNotificationPermissionFragment.request(activity, onResult)
+      LegacyNotificationPermissionFragment.request(
+        activity = activity,
+        requestId = requestId,
+        launchIfNeeded = launchIfNeeded,
+        onResult = onResult,
+      )
     }
   }
 
   private fun requestWithActivityResultRegistry(
     activity: ComponentActivity,
+    requestId: String,
+    launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean {
+    NotificationPermissionRequestRegistry.bind(requestId, onResult)
+
     return runCatching {
-      val key = "nuxie.notifications.${System.nanoTime()}"
-      lateinit var launcher: ActivityResultLauncher<String>
-      launcher = activity.activityResultRegistry.register(
-        key,
-        ActivityResultContracts.RequestPermission(),
-      ) { granted ->
-        launcher.unregister()
-        onResult(granted)
+      val launcher = notificationPermissionLauncher(activity, requestId)
+      if (launchIfNeeded && NotificationPermissionRequestRegistry.markLaunched(requestId)) {
+        launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
       }
-      launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }.onFailure {
+      NotificationPermissionRequestRegistry.clear(requestId)
       NuxieLogger.warning("FlowView: Failed to request notification permission: ${it.message}", it)
     }.isSuccess
+  }
+
+  private fun notificationPermissionLauncher(
+    activity: ComponentActivity,
+    requestId: String,
+  ): ActivityResultLauncher<String> {
+    synchronized(activityResultLaunchers) {
+      val launchersForActivity = activityResultLaunchers.getOrPut(activity) { mutableMapOf() }
+      launchersForActivity[requestId]?.let { return it }
+
+      val launcher =
+        activity.activityResultRegistry.register(
+          notificationPermissionActivityResultKey(requestId),
+          ActivityResultContracts.RequestPermission(),
+        ) { granted ->
+          NotificationPermissionRequestRegistry.complete(requestId, granted)
+          unregisterNotificationPermissionLauncher(activity, requestId)
+        }
+
+      launchersForActivity[requestId] = launcher
+      if (!NotificationPermissionRequestRegistry.hasPendingWork(requestId)) {
+        unregisterNotificationPermissionLauncher(activity, requestId)
+      }
+      return launcher
+    }
+  }
+
+  private fun unregisterNotificationPermissionLauncher(
+    activity: ComponentActivity,
+    requestId: String,
+  ) {
+    synchronized(activityResultLaunchers) {
+      val launchersForActivity = activityResultLaunchers[activity] ?: return
+      val launcher = launchersForActivity.remove(requestId) ?: return
+      launcher.unregister()
+      if (launchersForActivity.isEmpty()) {
+        activityResultLaunchers.remove(activity)
+      }
+    }
+  }
+
+  companion object {
+    internal fun notificationPermissionActivityResultKey(requestId: String): String {
+      return "io.nuxie.sdk.notifications.permission.$requestId"
+    }
   }
 }
 
 @Suppress("DEPRECATION")
 private class LegacyNotificationPermissionFragment : Fragment() {
-  private var onResult: ((Boolean) -> Unit)? = null
   private var didRequestPermission: Boolean = false
 
-  fun startRequest(onResult: (Boolean) -> Unit) {
-    this.onResult = onResult
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    didRequestPermission = savedInstanceState?.getBoolean(STATE_DID_REQUEST_PERMISSION) ?: false
+  }
+
+  override fun onResume() {
+    super.onResume()
+    requestPermissionIfNeeded()
+  }
+
+  override fun onSaveInstanceState(outState: Bundle) {
+    outState.putBoolean(STATE_DID_REQUEST_PERMISSION, didRequestPermission)
+    super.onSaveInstanceState(outState)
+  }
+
+  private fun requestPermissionIfNeeded() {
     if (didRequestPermission || !isAdded) return
     didRequestPermission = true
     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
@@ -126,17 +269,24 @@ private class LegacyNotificationPermissionFragment : Fragment() {
     }
 
     val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-    onResult?.invoke(granted)
-    onResult = null
+    NotificationPermissionRequestRegistry.complete(requestId(), granted)
     activity?.fragmentManager?.beginTransaction()?.remove(this)?.commitAllowingStateLoss()
   }
 
+  private fun requestId(): String {
+    return arguments?.getString(ARG_REQUEST_ID).orEmpty()
+  }
+
   companion object {
-    private const val TAG = "io.nuxie.sdk.notifications.permission"
+    private const val TAG_PREFIX = "io.nuxie.sdk.notifications.permission"
     private const val REQUEST_CODE = 41073
+    private const val ARG_REQUEST_ID = "request_id"
+    private const val STATE_DID_REQUEST_PERMISSION = "did_request_permission"
 
     fun request(
       activity: Activity,
+      requestId: String,
+      launchIfNeeded: Boolean,
       onResult: (Boolean) -> Unit,
     ): Boolean {
       if (activity.isFinishing) {
@@ -146,26 +296,41 @@ private class LegacyNotificationPermissionFragment : Fragment() {
         return false
       }
 
+      NotificationPermissionRequestRegistry.bind(requestId, onResult)
+
       val manager = activity.fragmentManager
-      if (manager.findFragmentByTag(TAG) != null) {
-        return false
+      val tag = fragmentTag(requestId)
+      if (manager.findFragmentByTag(tag) != null) {
+        return true
+      }
+
+      if (!launchIfNeeded) {
+        return NotificationPermissionRequestRegistry.hasPendingWork(requestId)
+      }
+
+      if (!NotificationPermissionRequestRegistry.markLaunched(requestId)) {
+        return true
       }
 
       return runCatching {
         val fragment =
           LegacyNotificationPermissionFragment().also {
-            manager.beginTransaction().add(it, TAG).commitAllowingStateLoss()
+            it.arguments = Bundle().apply {
+              putString(ARG_REQUEST_ID, requestId)
+            }
+            manager.beginTransaction().add(it, tag).commitAllowingStateLoss()
             manager.executePendingTransactions()
           }
-
-        fragment.startRequest(onResult)
       }.onFailure {
+        NotificationPermissionRequestRegistry.clear(requestId)
         NuxieLogger.warning(
           "FlowView: Failed to request notification permission from Activity host: ${it.message}",
           it,
         )
       }.isSuccess
     }
+
+    private fun fragmentTag(requestId: String): String = "$TAG_PREFIX.$requestId"
   }
 }
 
@@ -199,6 +364,8 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var scope: CoroutineScope? = null
   private var flow: Flow? = null
   private var bundleStore: FlowBundleStore? = null
+  private var pendingNotificationPermissionRequestId: String? = null
+  private var pendingNotificationPermissionJourneyId: String? = null
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
   internal var notificationPermissionEventSink:
@@ -221,9 +388,31 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var latestSafeAreaInsets = SafeAreaInsets(top = 0, bottom = 0, left = 0, right = 0)
   private var dispatchedSafeAreaInsets: SafeAreaInsets? = null
 
+  init {
+    if (id == View.NO_ID) {
+      id = View.generateViewId()
+    }
+  }
+
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
     requestApplyInsets()
+    rebindPendingNotificationPermissionRequestIfNeeded()
+  }
+
+  override fun onSaveInstanceState(): Parcelable? {
+    val state = SavedState(super.onSaveInstanceState())
+    state.pendingNotificationPermissionRequestId = pendingNotificationPermissionRequestId
+    state.pendingNotificationPermissionJourneyId = pendingNotificationPermissionJourneyId
+    return state
+  }
+
+  override fun onRestoreInstanceState(state: Parcelable?) {
+    val savedState = state as? SavedState
+    super.onRestoreInstanceState(savedState?.superState ?: state)
+    pendingNotificationPermissionRequestId = savedState?.pendingNotificationPermissionRequestId
+    pendingNotificationPermissionJourneyId = savedState?.pendingNotificationPermissionJourneyId
+    rebindPendingNotificationPermissionRequestIfNeeded()
   }
 
   override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
@@ -309,6 +498,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     setState(State.LOADING)
     startLoadTimeout()
     webView.loadUrl(entryUrl)
+    rebindPendingNotificationPermissionRequestIfNeeded()
   }
 
   fun sendRuntimeMessage(type: String, payload: JsonObject = JsonObject(emptyMap()), replyTo: String? = null) {
@@ -629,15 +819,18 @@ class FlowView(context: Context) : FrameLayout(context) {
         emitDenied()
         return
       }
-      val launched = notificationPermissionHandler.requestPostNotificationsPermission(activity) { granted ->
-        val enabledAfterResult = notificationPermissionHandler.areNotificationsEnabled(context)
-        if (granted && enabledAfterResult) {
-          emitEnabled()
-        } else {
-          emitDenied()
-        }
-      }
+      val requestId = pendingNotificationPermissionRequestId ?: UUID.randomUUID().toString()
+      pendingNotificationPermissionRequestId = requestId
+      pendingNotificationPermissionJourneyId = journeyId
+      val launched =
+        notificationPermissionHandler.requestPostNotificationsPermission(
+          activity = activity,
+          requestId = requestId,
+          launchIfNeeded = true,
+          onResult = notificationPermissionResultCallback(journeyId),
+        )
       if (!launched) {
+        clearPendingNotificationPermissionRequest()
         emitDenied()
       }
       return
@@ -711,6 +904,75 @@ class FlowView(context: Context) : FrameLayout(context) {
       current = current.baseContext
     }
     return current as? Activity
+  }
+
+  private fun rebindPendingNotificationPermissionRequestIfNeeded() {
+    val requestId = pendingNotificationPermissionRequestId ?: return
+    val activity = findActivity(context) ?: return
+    notificationPermissionHandler.requestPostNotificationsPermission(
+      activity = activity,
+      requestId = requestId,
+      launchIfNeeded = false,
+      onResult = notificationPermissionResultCallback(pendingNotificationPermissionJourneyId),
+    )
+  }
+
+  private fun notificationPermissionResultCallback(journeyId: String?): (Boolean) -> Unit {
+    return { granted ->
+      clearPendingNotificationPermissionRequest()
+      val properties = buildNotificationEventProperties(journeyId)
+      val enabledAfterResult = notificationPermissionHandler.areNotificationsEnabled(context)
+      if (granted && enabledAfterResult) {
+        emitNotificationPermissionEvent(
+          eventName = SystemEventNames.notificationsEnabled,
+          properties = properties,
+          journeyId = journeyId,
+        )
+      } else {
+        emitNotificationPermissionEvent(
+          eventName = SystemEventNames.notificationsDenied,
+          properties = properties,
+          journeyId = journeyId,
+        )
+      }
+    }
+  }
+
+  private fun clearPendingNotificationPermissionRequest() {
+    val requestId = pendingNotificationPermissionRequestId
+    pendingNotificationPermissionRequestId = null
+    pendingNotificationPermissionJourneyId = null
+    if (requestId != null) {
+      NotificationPermissionRequestRegistry.clear(requestId)
+    }
+  }
+
+  private class SavedState : View.BaseSavedState {
+    var pendingNotificationPermissionRequestId: String? = null
+    var pendingNotificationPermissionJourneyId: String? = null
+
+    constructor(superState: Parcelable?) : super(superState)
+
+    private constructor(source: Parcel) : super(source) {
+      pendingNotificationPermissionRequestId = source.readString()
+      pendingNotificationPermissionJourneyId = source.readString()
+    }
+
+    override fun writeToParcel(out: Parcel, flags: Int) {
+      super.writeToParcel(out, flags)
+      out.writeString(pendingNotificationPermissionRequestId)
+      out.writeString(pendingNotificationPermissionJourneyId)
+    }
+
+    companion object {
+      @JvmField
+      val CREATOR: Parcelable.Creator<SavedState> =
+        object : Parcelable.Creator<SavedState> {
+          override fun createFromParcel(source: Parcel): SavedState = SavedState(source)
+
+          override fun newArray(size: Int): Array<SavedState?> = arrayOfNulls(size)
+        }
+    }
   }
 
   private fun openLinkInternal(urlString: String, target: String?) {

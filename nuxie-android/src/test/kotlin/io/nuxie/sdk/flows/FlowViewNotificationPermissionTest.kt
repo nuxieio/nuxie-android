@@ -4,6 +4,9 @@ import android.app.Activity
 import android.content.Context
 import android.os.Build
 import android.os.Looper
+import android.os.Parcelable
+import android.util.SparseArray
+import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
 import io.nuxie.sdk.events.SystemEventNames
@@ -11,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -19,6 +23,11 @@ import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class FlowViewNotificationPermissionTest {
+  @Before
+  fun resetNotificationPermissionRequestRegistry() {
+    NotificationPermissionRequestRegistry.resetForTest()
+  }
+
   @Test
   fun requestNotifications_emitsEnabledWhenPermissionAlreadyGranted() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
@@ -51,10 +60,6 @@ class FlowViewNotificationPermissionTest {
     val handler = FakeNotificationPermissionHandler(
       notificationsEnabled = false,
       permissionGranted = false,
-      requestBehavior = { callback ->
-        callback(true)
-        true
-      },
       notificationsEnabledAfterRequest = true,
     )
     val flowView = FlowView(activity).apply {
@@ -66,6 +71,8 @@ class FlowViewNotificationPermissionTest {
     flowView.notificationPermissionEventSink = { event, _, _ -> triggered += event }
 
     flowView.performRequestNotifications("journey_1")
+    val requestId = handler.requests.single().requestId
+    handler.resolve(requestId, granted = true)
     shadowOf(Looper.getMainLooper()).idle()
 
     assertEquals(1, handler.requestInvocations)
@@ -78,10 +85,6 @@ class FlowViewNotificationPermissionTest {
     val handler = FakeNotificationPermissionHandler(
       notificationsEnabled = false,
       permissionGranted = false,
-      requestBehavior = { callback ->
-        callback(true)
-        true
-      },
       notificationsEnabledAfterRequest = true,
     )
     val flowView = FlowView(activity).apply {
@@ -93,6 +96,8 @@ class FlowViewNotificationPermissionTest {
     flowView.notificationPermissionEventSink = { event, _, _ -> triggered += event }
 
     flowView.performRequestNotifications("journey_1")
+    val requestId = handler.requests.single().requestId
+    handler.resolve(requestId, granted = true)
     shadowOf(Looper.getMainLooper()).idle()
 
     assertEquals(1, handler.requestInvocations)
@@ -149,6 +154,71 @@ class FlowViewNotificationPermissionTest {
     )
     assertTrue(receiver.runtimeMessages.isEmpty())
   }
+
+  @Test
+  fun requestNotifications_rebindsPendingRequestAfterHierarchyStateRestore() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeNotificationPermissionHandler(
+      notificationsEnabled = false,
+      permissionGranted = false,
+      notificationsEnabledAfterRequest = true,
+    )
+    val viewId = View.generateViewId()
+    val flowView = FlowView(activity).apply {
+      id = viewId
+      notificationPermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    flowView.performRequestNotifications("journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val savedState = SparseArray<Parcelable>()
+    flowView.saveHierarchyState(savedState)
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    val restoredView = FlowView(activity).apply {
+      id = viewId
+      notificationPermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+      notificationPermissionEventSink = { event, properties, _ ->
+        triggered += event to properties
+      }
+    }
+    restoredView.restoreHierarchyState(savedState)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(2, handler.requests.size)
+    val initialRequest = handler.requests[0]
+    val reboundRequest = handler.requests[1]
+    assertEquals(true, initialRequest.launchIfNeeded)
+    assertEquals(false, reboundRequest.launchIfNeeded)
+    assertEquals(initialRequest.requestId, reboundRequest.requestId)
+
+    handler.resolve(initialRequest.requestId, granted = true)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.notificationsEnabled to mapOf("journey_id" to "journey_1"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
+  fun notificationPermissionRequestRegistry_deliversPendingResultToReboundCallback() {
+    val requestId = "req_1"
+    var reboundGranted: Boolean? = null
+
+    NotificationPermissionRequestRegistry.markLaunched(requestId)
+    NotificationPermissionRequestRegistry.complete(requestId, granted = true)
+    NotificationPermissionRequestRegistry.bind(requestId) { granted ->
+      reboundGranted = granted
+    }
+
+    assertEquals(true, reboundGranted)
+  }
 }
 
 private class FakeNotificationPermissionEventReceiver :
@@ -174,10 +244,13 @@ private class FakeNotificationPermissionEventReceiver :
 private class FakeNotificationPermissionHandler(
   private var notificationsEnabled: Boolean,
   private var permissionGranted: Boolean,
-  private val requestBehavior: ((callback: (Boolean) -> Unit) -> Boolean)? = null,
   private val notificationsEnabledAfterRequest: Boolean? = null,
 ) : NotificationPermissionHandler {
+  data class Request(val requestId: String, val launchIfNeeded: Boolean)
+
   var requestInvocations: Int = 0
+  val requests = mutableListOf<Request>()
+  private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
 
   override fun areNotificationsEnabled(context: Context): Boolean {
     return notificationsEnabled
@@ -189,16 +262,21 @@ private class FakeNotificationPermissionHandler(
 
   override fun requestPostNotificationsPermission(
     activity: Activity,
+    requestId: String,
+    launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
   ): Boolean {
     requestInvocations += 1
-    val launched = requestBehavior?.invoke { granted ->
-      permissionGranted = granted
-      if (notificationsEnabledAfterRequest != null) {
-        notificationsEnabled = notificationsEnabledAfterRequest
-      }
-      onResult(granted)
-    } ?: false
-    return launched
+    requests += Request(requestId = requestId, launchIfNeeded = launchIfNeeded)
+    callbacks[requestId] = onResult
+    return true
+  }
+
+  fun resolve(requestId: String, granted: Boolean) {
+    permissionGranted = granted
+    if (notificationsEnabledAfterRequest != null) {
+      notificationsEnabled = notificationsEnabledAfterRequest
+    }
+    callbacks.remove(requestId)?.invoke(granted)
   }
 }

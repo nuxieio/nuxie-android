@@ -308,6 +308,45 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedNotificationPermissionExit_doesNotLeaveJourneyPersistedAsActive() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = mapOf(
+        "__global__" to listOf(
+          Interaction(
+            id = "notifications_exit",
+            trigger = InteractionTrigger.Event(eventName = SystemEventNames.notificationsEnabled),
+            actions = listOf(
+              InteractionAction.Exit(reason = "completed")
+            ),
+            enabled = true,
+          )
+        )
+      ),
+    )
+
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_origin", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.journey.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.journey.id),
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun oneTimeReentry_suppressesSecondJourney() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.OneTime)
     try {
@@ -774,6 +813,7 @@ class JourneyServiceTest {
     val scope: CoroutineScope,
     val service: JourneyService,
     val eventService: EventService,
+    val journeyStore: JourneyStore,
     val broker: DefaultTriggerBroker,
     val presented: MutableList<Pair<String, String>>,
     val campaigns: List<Campaign>,
@@ -909,6 +949,7 @@ class JourneyServiceTest {
       scope = scope,
       service = service,
       eventService = eventService,
+      journeyStore = journeyStore,
       broker = broker,
       presented = presented,
       campaigns = listOf(campaign),

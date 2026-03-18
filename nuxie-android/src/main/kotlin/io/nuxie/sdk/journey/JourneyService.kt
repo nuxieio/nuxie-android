@@ -494,7 +494,9 @@ class JourneyService(
         val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
         handleOutcome(outcome, journey)
       }
-      persistJourney(journey)
+      if (journey.status.isLive) {
+        persistJourney(journey)
+      }
       return
     }
 
@@ -503,7 +505,9 @@ class JourneyService(
       val outcome = runner.dispatchEventTrigger(event)
       handleOutcome(outcome, journey)
     }
-    persistJourney(journey)
+    if (journey.status.isLive) {
+      persistJourney(journey)
+    }
   }
 
   suspend fun resumeFromServerState(journeys: List<ActiveJourney>, campaigns: List<Campaign>) {
