@@ -16,4 +16,7 @@ object SystemEventNames {
   const val restoreCompleted: String = "\$restore_completed"
   const val restoreFailed: String = "\$restore_failed"
   const val restoreNoPurchases: String = "\$restore_no_purchases"
+
+  const val notificationsEnabled: String = "\$notifications_enabled"
+  const val notificationsDenied: String = "\$notifications_denied"
 }

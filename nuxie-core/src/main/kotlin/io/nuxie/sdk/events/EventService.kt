@@ -41,6 +41,47 @@ class EventService(
     private const val DEFAULT_QUERY_LIMIT = 5_000
   }
 
+  fun prepareTriggerEvent(
+    event: String,
+    properties: Map<String, Any?>? = null,
+    userProperties: Map<String, Any?>? = null,
+    userPropertiesSetOnce: Map<String, Any?>? = null,
+  ): NuxieEvent {
+    if (event.isBlank()) {
+      throw IllegalArgumentException("Event name cannot be empty")
+    }
+
+    val distinctId = identityService.getDistinctId()
+
+    val mergedProps = buildMap<String, Any?> {
+      putAll(properties ?: emptyMap())
+      if (userProperties != null) put("\$set", userProperties)
+      if (userPropertiesSetOnce != null) put("\$set_once", userPropertiesSetOnce)
+
+      if (!containsKey("\$session_id")) {
+        val sessionId = sessionService.getSessionId(readOnly = false)
+        if (sessionId != null) {
+          put("\$session_id", sessionId)
+          sessionService.touchSession()
+        }
+      }
+    }.let { props ->
+      configuration.propertiesSanitizer?.sanitize(props) ?: props
+    }
+
+    val nuxieEvent = NuxieEvent(
+      name = event,
+      distinctId = distinctId,
+      properties = mergedProps,
+    )
+
+    return if (configuration.beforeSend != null) {
+      configuration.beforeSend?.invoke(nuxieEvent) ?: throw IllegalStateException("Event dropped by beforeSend")
+    } else {
+      nuxieEvent
+    }
+  }
+
   fun track(
     event: String,
     properties: Map<String, Any?>? = null,
@@ -149,6 +190,7 @@ class EventService(
     properties: Map<String, Any?>? = null,
     userProperties: Map<String, Any?>? = null,
     userPropertiesSetOnce: Map<String, Any?>? = null,
+    persistToHistory: Boolean = true,
   ): Pair<NuxieEvent, EventResponse> {
     if (event.isBlank()) {
       throw IllegalArgumentException("Event name cannot be empty")
@@ -156,39 +198,18 @@ class EventService(
 
     // Ensure any queued events are delivered first so the trigger call observes a consistent order.
     runCatching { networkQueue.flush(forceSend = true) }
-
-    val distinctId = identityService.getDistinctId()
-
-    val mergedProps = buildMap<String, Any?> {
-      putAll(properties ?: emptyMap())
-      if (userProperties != null) put("\$set", userProperties)
-      if (userPropertiesSetOnce != null) put("\$set_once", userPropertiesSetOnce)
-
-      if (!containsKey("\$session_id")) {
-        val sessionId = sessionService.getSessionId(readOnly = false)
-        if (sessionId != null) {
-          put("\$session_id", sessionId)
-          sessionService.touchSession()
-        }
-      }
-    }.let { props ->
-      configuration.propertiesSanitizer?.sanitize(props) ?: props
-    }
-
-    val nuxieEvent = NuxieEvent(
-      name = event,
-      distinctId = distinctId,
-      properties = mergedProps,
+    val finalEvent = prepareTriggerEvent(
+      event = event,
+      properties = properties,
+      userProperties = userProperties,
+      userPropertiesSetOnce = userPropertiesSetOnce,
     )
 
-    val finalEvent = if (configuration.beforeSend != null) {
-      configuration.beforeSend?.invoke(nuxieEvent) ?: throw IllegalStateException("Event dropped by beforeSend")
-    } else {
-      nuxieEvent
+    // Store event locally (best-effort) before trigger evaluation continues when the
+    // event should participate in shared user event history.
+    if (persistToHistory) {
+      runCatching { historyStore.insert(storedEvent(finalEvent)) }
     }
-
-    // Store event locally (best-effort) before trigger evaluation continues.
-    runCatching { historyStore.insert(storedEvent(finalEvent)) }
 
     val propsJson: JsonObject = toJsonObject(finalEvent.properties)
     val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)

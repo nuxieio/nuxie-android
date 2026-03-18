@@ -11,7 +11,13 @@ import io.nuxie.sdk.ir.IRFeatureQueries
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
+import io.nuxie.sdk.ir.Period
+import io.nuxie.sdk.ir.PredicateEval
+import io.nuxie.sdk.ir.StepQuery
 import io.nuxie.sdk.util.Iso8601
+import java.util.Calendar
+import java.util.Date
+import java.util.TimeZone
 
 data class GoalMetResult(
   val met: Boolean,
@@ -19,7 +25,11 @@ data class GoalMetResult(
 )
 
 interface GoalEvaluator {
-  suspend fun isGoalMet(journey: Journey, campaign: Campaign): GoalMetResult
+  suspend fun isGoalMet(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent>,
+  ): GoalMetResult
 }
 
 private data class EventOnlyAttributeEvaluation(
@@ -48,16 +58,30 @@ class DefaultGoalEvaluator(
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
 ) : GoalEvaluator {
 
-  override suspend fun isGoalMet(journey: Journey, campaign: Campaign): GoalMetResult {
+  override suspend fun isGoalMet(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent>,
+  ): GoalMetResult {
     val goal = journey.goalSnapshot ?: return GoalMetResult(met = false)
 
     val anchorMs = journey.conversionAnchorAtEpochMillis
 
     return when (goal.kind) {
-      GoalConfig.Kind.EVENT -> evaluateEventGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
+      GoalConfig.Kind.EVENT -> evaluateEventGoal(
+        goal,
+        journey = journey,
+        anchorEpochMillis = anchorMs,
+        transientEvents = transientEvents,
+      )
       GoalConfig.Kind.SEGMENT_ENTER -> evaluateSegmentEnterGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
       GoalConfig.Kind.SEGMENT_LEAVE -> evaluateSegmentLeaveGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
-      GoalConfig.Kind.ATTRIBUTE -> evaluateAttributeGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
+      GoalConfig.Kind.ATTRIBUTE -> evaluateAttributeGoal(
+        goal,
+        journey = journey,
+        anchorEpochMillis = anchorMs,
+        transientEvents = transientEvents,
+      )
     }
   }
 
@@ -65,6 +89,7 @@ class DefaultGoalEvaluator(
     goal: GoalConfig,
     journey: Journey,
     anchorEpochMillis: Long,
+    transientEvents: List<StoredEvent> = emptyList(),
   ): GoalMetResult {
     val eventName = goal.eventName ?: return GoalMetResult(met = false)
 
@@ -76,6 +101,7 @@ class DefaultGoalEvaluator(
       filter = goal.eventFilter,
       journey = journey,
       anchorEpochMillis = anchorEpochMillis,
+      additionalEvents = transientEvents,
     )
     return if (last != null) GoalMetResult(met = true, atEpochMillis = last) else GoalMetResult(met = false)
   }
@@ -119,6 +145,7 @@ class DefaultGoalEvaluator(
     goal: GoalConfig,
     journey: Journey,
     anchorEpochMillis: Long,
+    transientEvents: List<StoredEvent> = emptyList(),
   ): GoalMetResult {
     val expr = goal.attributeExpr ?: return GoalMetResult(met = false)
 
@@ -126,6 +153,7 @@ class DefaultGoalEvaluator(
       expr = expr.expr,
       journey = journey,
       anchorEpochMillis = anchorEpochMillis,
+      transientEvents = transientEvents,
     )?.let { result ->
       return if (result.met) {
         GoalMetResult(met = true, atEpochMillis = result.atEpochMillis)
@@ -145,7 +173,7 @@ class DefaultGoalEvaluator(
       IRRuntime.Config(
         nowEpochMillis = now,
         user = userProps,
-        events = eventQueries,
+        events = eventQueriesForAttributeEvaluation(journey, transientEvents),
         segments = segmentQueries,
         features = featureQueries,
         journeyId = journey.id,
@@ -172,19 +200,24 @@ class DefaultGoalEvaluator(
     journey: Journey,
     anchorEpochMillis: Long,
     allEvents: List<StoredEvent>? = null,
+    additionalEvents: List<StoredEvent> = emptyList(),
   ): Long? {
     val windowEndMs = windowEndEpochMillis(journey, anchorEpochMillis)
+    val events = mergeEvents(
+      primary = allEvents ?: loadEventsForUser(journey.distinctId, 1_000),
+      secondary = additionalEvents,
+    )
 
     if (filter == null) {
       return getLastEventTime(
         name = name,
-        distinctId = journey.distinctId,
+        events = events,
         sinceEpochMillis = anchorEpochMillis,
         untilEpochMillis = windowEndMs,
       )
     }
 
-    val matchingEvents = (allEvents ?: loadEventsForUser(journey.distinctId, 1_000)).asSequence()
+    val matchingEvents = events.asSequence()
       .filter { it.name == name }
       .filter { ev ->
         if (ev.timestampEpochMillis < anchorEpochMillis) return@filter false
@@ -224,11 +257,15 @@ class DefaultGoalEvaluator(
     journey: Journey,
     anchorEpochMillis: Long,
     eventCache: EventHistoryCache = EventHistoryCache(),
+    transientEvents: List<StoredEvent> = emptyList(),
   ): EventOnlyAttributeEvaluation? {
     suspend fun getCachedEvents(): List<StoredEvent> {
       val existing = eventCache.events
       if (existing != null) return existing
-      return loadEventsForUser(journey.distinctId, 1_000).also {
+      return mergeEvents(
+        primary = loadEventsForUser(journey.distinctId, 1_000),
+        secondary = transientEvents,
+      ).also {
         eventCache.events = it
       }
     }
@@ -241,6 +278,7 @@ class DefaultGoalEvaluator(
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
             eventCache = eventCache,
+            transientEvents = transientEvents,
           ) ?: return null
         }
         if (results.all { it.met }) {
@@ -260,6 +298,7 @@ class DefaultGoalEvaluator(
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
             eventCache = eventCache,
+            transientEvents = transientEvents,
           ) ?: return null
         }
         val metTimes = results.filter { it.met }.mapNotNull { it.atEpochMillis }
@@ -297,11 +336,10 @@ class DefaultGoalEvaluator(
 
   private suspend fun getLastEventTime(
     name: String,
-    distinctId: String,
+    events: List<StoredEvent>,
     sinceEpochMillis: Long,
     untilEpochMillis: Long?,
   ): Long? {
-    val events = loadEventsForUser(distinctId, 1_000)
     return events.asSequence()
       .filter { it.name == name }
       .filter { ev ->
@@ -310,5 +348,255 @@ class DefaultGoalEvaluator(
         true
       }
       .maxOfOrNull { it.timestampEpochMillis }
+  }
+
+  private fun mergeEvents(
+    primary: List<StoredEvent>,
+    secondary: List<StoredEvent>,
+  ): List<StoredEvent> {
+    if (secondary.isEmpty()) return primary
+    return (primary + secondary)
+      .distinctBy { it.id }
+  }
+
+  private fun eventQueriesForAttributeEvaluation(
+    journey: Journey,
+    transientEvents: List<StoredEvent>,
+  ): IREventQueries? {
+    if (transientEvents.isEmpty()) {
+      return eventQueries
+    }
+
+    return TransientEventQueries(
+      distinctId = journey.distinctId,
+      loadEventsForUser = loadEventsForUser,
+      transientEvents = transientEvents,
+      nowEpochMillis = nowEpochMillis,
+    )
+  }
+}
+
+private class TransientEventQueries(
+  private val distinctId: String,
+  private val loadEventsForUser: suspend (distinctId: String, limit: Int) -> List<StoredEvent>,
+  private val transientEvents: List<StoredEvent>,
+  private val nowEpochMillis: () -> Long,
+) : IREventQueries {
+  companion object {
+    private const val DEFAULT_QUERY_LIMIT = 5_000
+  }
+
+  override suspend fun exists(
+    name: String,
+    sinceEpochMillis: Long?,
+    untilEpochMillis: Long?,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Boolean {
+    return count(name, sinceEpochMillis, untilEpochMillis, where) > 0
+  }
+
+  override suspend fun count(
+    name: String,
+    sinceEpochMillis: Long?,
+    untilEpochMillis: Long?,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Int {
+    val events = mergedEvents(limit = 1_000)
+    return events.asSequence()
+      .filter { it.name == name }
+      .filter { ev ->
+        if (sinceEpochMillis != null && ev.timestampEpochMillis < sinceEpochMillis) return@filter false
+        if (untilEpochMillis != null && ev.timestampEpochMillis > untilEpochMillis) return@filter false
+        true
+      }
+      .filter { ev -> where?.let { PredicateEval.eval(it, ev.properties) } ?: true }
+      .count()
+  }
+
+  override suspend fun firstTime(name: String, where: io.nuxie.sdk.ir.IRPredicate?): Long? {
+    val events = mergedEvents(limit = DEFAULT_QUERY_LIMIT)
+      .asSequence()
+      .filter { it.name == name }
+      .filter { ev -> where?.let { PredicateEval.eval(it, ev.properties) } ?: true }
+      .sortedBy { it.timestampEpochMillis }
+      .toList()
+    return events.firstOrNull()?.timestampEpochMillis
+  }
+
+  override suspend fun lastTime(name: String, where: io.nuxie.sdk.ir.IRPredicate?): Long? {
+    val events = mergedEvents(limit = DEFAULT_QUERY_LIMIT)
+      .asSequence()
+      .filter { it.name == name }
+      .filter { ev -> where?.let { PredicateEval.eval(it, ev.properties) } ?: true }
+      .sortedByDescending { it.timestampEpochMillis }
+      .toList()
+    return events.firstOrNull()?.timestampEpochMillis
+  }
+
+  override suspend fun aggregate(
+    agg: io.nuxie.sdk.ir.Aggregate,
+    name: String,
+    prop: String,
+    sinceEpochMillis: Long?,
+    untilEpochMillis: Long?,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Double? {
+    val events = mergedEvents(limit = DEFAULT_QUERY_LIMIT)
+    val values = events.asSequence()
+      .filter { it.name == name }
+      .filter { ev ->
+        if (sinceEpochMillis != null && ev.timestampEpochMillis < sinceEpochMillis) return@filter false
+        if (untilEpochMillis != null && ev.timestampEpochMillis > untilEpochMillis) return@filter false
+        true
+      }
+      .mapNotNull { ev ->
+        where?.let { if (!PredicateEval.eval(it, ev.properties)) return@mapNotNull null }
+        io.nuxie.sdk.ir.Coercion.asNumber(ev.properties[prop])
+      }
+      .toList()
+
+    if (values.isEmpty()) return null
+
+    return when (agg) {
+      io.nuxie.sdk.ir.Aggregate.SUM -> values.sum()
+      io.nuxie.sdk.ir.Aggregate.AVG -> values.sum() / values.size.toDouble()
+      io.nuxie.sdk.ir.Aggregate.MIN -> values.minOrNull()
+      io.nuxie.sdk.ir.Aggregate.MAX -> values.maxOrNull()
+      io.nuxie.sdk.ir.Aggregate.UNIQUE -> values.toSet().size.toDouble()
+    }
+  }
+
+  override suspend fun inOrder(
+    steps: List<StepQuery>,
+    overallWithinSeconds: Double?,
+    perStepWithinSeconds: Double?,
+    sinceEpochMillis: Long?,
+    untilEpochMillis: Long?,
+  ): Boolean {
+    val events = mergedEvents(limit = DEFAULT_QUERY_LIMIT)
+      .asSequence()
+      .filter { ev ->
+        if (sinceEpochMillis != null && ev.timestampEpochMillis < sinceEpochMillis) return@filter false
+        if (untilEpochMillis != null && ev.timestampEpochMillis > untilEpochMillis) return@filter false
+        true
+      }
+      .sortedBy { it.timestampEpochMillis }
+      .toList()
+
+    var lastTime: Long? = null
+    val startRef = events.firstOrNull()?.timestampEpochMillis
+
+    for (step in steps) {
+      val match = events.firstOrNull { ev ->
+        val after = lastTime ?: sinceEpochMillis ?: Long.MIN_VALUE
+        if (ev.timestampEpochMillis < after) return@firstOrNull false
+        if (ev.name != step.name) return@firstOrNull false
+        if (step.predicate != null && !PredicateEval.eval(step.predicate, ev.properties)) return@firstOrNull false
+        if (perStepWithinSeconds != null && lastTime != null) {
+          if ((ev.timestampEpochMillis - lastTime) > (perStepWithinSeconds * 1000.0)) return@firstOrNull false
+        }
+        if (overallWithinSeconds != null && startRef != null) {
+          if ((ev.timestampEpochMillis - startRef) > (overallWithinSeconds * 1000.0)) return@firstOrNull false
+        }
+        true
+      } ?: return false
+      lastTime = match.timestampEpochMillis
+    }
+
+    return true
+  }
+
+  override suspend fun activePeriods(
+    name: String,
+    period: Period,
+    total: Int,
+    min: Int,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Boolean {
+    val events = mergedEvents(limit = 10_000)
+      .asSequence()
+      .filter { it.name == name }
+      .toList()
+
+    if (total <= 0 || min <= 0) return false
+
+    val tz = TimeZone.getTimeZone("UTC")
+    val cal = Calendar.getInstance(tz).apply { timeZone = tz }
+    val nowMs = nowEpochMillis()
+
+    val windowStartMs = run {
+      cal.time = Date(nowMs)
+      when (period) {
+        Period.DAY -> cal.add(Calendar.DAY_OF_YEAR, -total)
+        Period.WEEK -> cal.add(Calendar.WEEK_OF_YEAR, -total)
+        Period.MONTH -> cal.add(Calendar.MONTH, -total)
+        Period.YEAR -> cal.add(Calendar.YEAR, -total)
+      }
+      cal.timeInMillis
+    }
+
+    val buckets = HashSet<String>()
+    for (ev in events) {
+      if (ev.timestampEpochMillis < windowStartMs) continue
+      if (where != null && !PredicateEval.eval(where, ev.properties)) continue
+
+      cal.time = Date(ev.timestampEpochMillis)
+      val key = when (period) {
+        Period.DAY -> "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.MONTH)}-${cal.get(Calendar.DAY_OF_MONTH)}"
+        Period.WEEK -> "${cal.weekYear}-W${cal.get(Calendar.WEEK_OF_YEAR)}"
+        Period.MONTH -> "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.MONTH)}"
+        Period.YEAR -> "${cal.get(Calendar.YEAR)}"
+      }
+      buckets.add(key)
+    }
+
+    return buckets.size >= min
+  }
+
+  override suspend fun stopped(
+    name: String,
+    inactiveForSeconds: Double,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Boolean {
+    val last = lastTime(name, where) ?: return false
+    return (nowEpochMillis() - last) >= (inactiveForSeconds * 1000.0)
+  }
+
+  override suspend fun restarted(
+    name: String,
+    inactiveForSeconds: Double,
+    withinSeconds: Double,
+    where: io.nuxie.sdk.ir.IRPredicate?,
+  ): Boolean {
+    val nowMs = nowEpochMillis()
+    val events = mergedEvents(limit = DEFAULT_QUERY_LIMIT)
+      .asSequence()
+      .filter { it.name == name }
+      .filter { ev -> where?.let { PredicateEval.eval(it, ev.properties) } ?: true }
+      .sortedBy { it.timestampEpochMillis }
+      .toList()
+
+    var prev: Long? = null
+    var hadGap = false
+    val inactiveForMs = (inactiveForSeconds * 1000.0).toLong()
+
+    for (ev in events) {
+      if (prev != null && (ev.timestampEpochMillis - prev) >= inactiveForMs) {
+        hadGap = true
+      }
+      prev = ev.timestampEpochMillis
+    }
+
+    if (!hadGap) return false
+
+    val withinMs = (withinSeconds * 1000.0).toLong()
+    return events.any { ev -> (nowMs - ev.timestampEpochMillis) <= withinMs }
+  }
+
+  private suspend fun mergedEvents(limit: Int): List<StoredEvent> {
+    val persisted = loadEventsForUser(distinctId, limit)
+    if (transientEvents.isEmpty()) return persisted
+    return (persisted + transientEvents)
+      .distinctBy { it.id }
   }
 }

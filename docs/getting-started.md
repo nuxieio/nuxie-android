@@ -87,23 +87,28 @@ sdk.showFlow("flow_123")
 ### Custom hosted `FlowView`
 
 ```kotlin
-val flowView = sdk.getFlowView(activity = this, flowId = "flow_123")
+val flowView = sdk.getFlowView(
+  activity = this,
+  flowId = "flow_123",
+  viewId = R.id.nuxie_flow_slot,
+)
 container.addView(flowView)
 ```
 
 ## Compose Hosting Example
 
-`getFlowView(...)` needs an `Activity`. In Compose, resolve activity from context and host with `AndroidView`.
+`getFlowView(...)` needs a `ComponentActivity` and a stable `viewId`. In Compose, resolve the host activity from context, keep the id in `rememberSaveable`, and host with `AndroidView`.
 
 ```kotlin
 @Composable
 fun NuxieFlowContainer(flowId: String) {
   val context = LocalContext.current
-  val activity = context as? Activity ?: return
+  val activity = context as? ComponentActivity ?: return
+  val flowViewId = rememberSaveable { View.generateViewId() }
   var flowView by remember(flowId) { mutableStateOf<FlowView?>(null) }
 
-  LaunchedEffect(activity, flowId) {
-    flowView = NuxieSDK.shared().getFlowView(activity, flowId)
+  LaunchedEffect(activity, flowId, flowViewId) {
+    flowView = NuxieSDK.shared().getFlowView(activity, flowId, flowViewId)
   }
 
   flowView?.let { view ->

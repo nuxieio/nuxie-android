@@ -120,4 +120,44 @@ class EventServiceTrackForTriggerTest {
     assertNotNull(capturedProps!!["\$set"])
     assertNotNull(capturedProps!!["\$set_once"])
   }
+
+  @Test
+  fun trackForTrigger_can_skip_local_history_storage() = runTest {
+    val api = FakeApi { _, _ ->
+      EventResponse(
+        status = "ok",
+        event = EventResponse.EventInfo(id = "server_event_2", processed = true),
+      )
+    }
+
+    val historyStore = InMemoryEventHistoryStore()
+    val service = EventService(
+      identityService = DefaultIdentityService(InMemoryKeyValueStore()).also { it.setDistinctId("user_1") },
+      sessionService = DefaultSessionService(),
+      configuration = NuxieConfiguration(apiKey = "k"),
+      api = api,
+      store = InMemoryEventQueueStore(),
+      historyStore = historyStore,
+      networkQueue = NuxieNetworkQueue(
+        store = InMemoryEventQueueStore(),
+        api = api,
+        scope = this,
+        flushAt = 999,
+        flushIntervalSeconds = 999,
+        maxQueueSize = 1000,
+        maxBatchSize = 50,
+        maxRetries = 0,
+        baseRetryDelaySeconds = 1,
+      ),
+      scope = this,
+    )
+
+    service.trackForTrigger(
+      event = "scoped_notification",
+      properties = mapOf("journey_id" to "journey_1"),
+      persistToHistory = false,
+    )
+
+    assertTrue(historyStore.getEventsForUser("user_1", limit = 10).isEmpty())
+  }
 }

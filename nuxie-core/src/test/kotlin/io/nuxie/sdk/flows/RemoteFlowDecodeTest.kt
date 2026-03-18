@@ -69,6 +69,13 @@ class RemoteFlowDecodeTest {
               "actions": [
                 { "type": "unknown_action", "foo": 1 }
               ]
+            },
+            {
+              "id": "i4",
+              "trigger": { "type": "press" },
+              "actions": [
+                { "type": "request_notifications" }
+              ]
             }
           ]
         },
@@ -101,7 +108,7 @@ class RemoteFlowDecodeTest {
 
     val interactions = flow.interactions["screen_1"]
     assertNotNull(interactions)
-    assertEquals(3, interactions!!.size)
+    assertEquals(4, interactions!!.size)
 
     val globalInteractions = flow.interactions["__global__"]
     assertNotNull(globalInteractions)
@@ -132,5 +139,8 @@ class RemoteFlowDecodeTest {
     val unknownAction = unknown.actions[0] as InteractionAction.Unknown
     assertEquals("unknown_action", unknownAction.type)
     assertTrue(unknownAction.payload.containsKey("foo"))
+
+    val notifications = interactions[3]
+    assertTrue(notifications.actions[0] is InteractionAction.RequestNotifications)
   }
 }

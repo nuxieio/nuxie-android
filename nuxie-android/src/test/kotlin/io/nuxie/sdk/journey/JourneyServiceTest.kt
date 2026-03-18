@@ -71,6 +71,7 @@ class JourneyServiceTest {
   private class FakeApi(
     private val profile: ProfileResponse,
     private val remoteFlow: RemoteFlow,
+    private val trackDelayMillis: Long = 0,
   ) : NuxieApiProtocol {
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
@@ -83,7 +84,12 @@ class JourneyServiceTest {
       value: Double?,
       entityId: String?,
       timestamp: String,
-    ): EventResponse = EventResponse(status = "ok")
+    ): EventResponse {
+      if (trackDelayMillis > 0) {
+        delay(trackDelayMillis)
+      }
+      return EventResponse(status = "ok")
+    }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
@@ -302,6 +308,45 @@ class JourneyServiceTest {
       assertEquals(JourneyExitReason.GOAL_MET, journeyUpdate?.journey?.exitReason)
       assertTrue(journeyUpdate?.journey?.goalMet == true)
       assertNotNull(journeyUpdate?.journey?.goalMetAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedNotificationPermissionExit_doesNotLeaveJourneyPersistedAsActive() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = mapOf(
+        "__global__" to listOf(
+          Interaction(
+            id = "notifications_exit",
+            trigger = InteractionTrigger.Event(eventName = SystemEventNames.notificationsEnabled),
+            actions = listOf(
+              InteractionAction.Exit(reason = "completed")
+            ),
+            enabled = true,
+          )
+        )
+      ),
+    )
+
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_origin", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.journey.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.journey.id),
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
     } finally {
       harness.close()
     }
@@ -622,6 +667,140 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedNotificationPermissionEvent_onlyAdvancesTheRequestingJourney() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = SystemEventNames.notificationsEnabled,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_1", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+      val resumedJourneyId = "journey_scope_2"
+      harness.service.resumeFromServerState(
+        journeys = listOf(
+          ActiveJourney(
+            sessionId = resumedJourneyId,
+            campaignId = "camp_1",
+            currentNodeId = "screen_1",
+            context = JsonObject(emptyMap()),
+          )
+        ),
+        campaigns = harness.campaigns,
+      )
+      delay(80)
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+      delay(80)
+
+      val historyAfterScopedEvent = harness.eventService.getEventsForUser("user_1", limit = 100)
+      assertTrue(historyAfterScopedEvent.none { it.name == SystemEventNames.notificationsEnabled })
+
+      harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_noop", name = "noop", distinctId = "user_1")
+      )
+      delay(80)
+
+      val activeById = harness.service.getActiveJourneys("user_1").associateBy { it.id }
+      assertEquals(2, activeById.size)
+      assertNotNull(activeById[started.id])
+      assertNotNull(activeById[resumedJourneyId])
+      assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
+      assertTrue(activeById[resumedJourneyId]?.convertedAtEpochMillis == null)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      trackDelayMillis = 750,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_wait", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      started.flowState.pendingAction = FlowPendingAction(
+        interactionId = "wait_notifications",
+        screenId = null,
+        componentId = null,
+        actionIndex = 0,
+        kind = FlowPendingActionKind.WAIT_UNTIL,
+        resumeAtEpochMillis = null,
+        condition = null,
+        maxTimeMs = null,
+        startedAtEpochMillis = System.currentTimeMillis(),
+        resumeActions = listOf(InteractionAction.Exit(reason = "completed")),
+      )
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedNotificationPermissionEvent_honorsBeforeSendDrop() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = SystemEventNames.notificationsEnabled,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+      beforeSend = { event ->
+        if (event.name == SystemEventNames.notificationsEnabled) null else event
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_drop", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.id, active.first().id)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+      assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun runtimeDismiss_forwardsDismissedCallbackWithReasonAndError() = runBlocking {
     val dismissCalls = mutableListOf<DismissCall>()
     val harness = newHarness(
@@ -739,6 +918,7 @@ class JourneyServiceTest {
     val scope: CoroutineScope,
     val service: JourneyService,
     val eventService: EventService,
+    val journeyStore: JourneyStore,
     val broker: DefaultTriggerBroker,
     val presented: MutableList<Pair<String, String>>,
     val campaigns: List<Campaign>,
@@ -753,6 +933,8 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
+    beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
+    trackDelayMillis: Long = 0,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
@@ -798,8 +980,10 @@ class JourneyServiceTest {
       )
     )
 
-    val api = FakeApi(profile = profile, remoteFlow = remoteFlow)
-    val config = NuxieConfiguration("test_key")
+    val api = FakeApi(profile = profile, remoteFlow = remoteFlow, trackDelayMillis = trackDelayMillis)
+    val config = NuxieConfiguration("test_key").apply {
+      this.beforeSend = beforeSend
+    }
     val queueStore = InMemoryEventQueueStore()
     val historyStore = InMemoryEventHistoryStore()
     val networkQueue = NuxieNetworkQueue(
@@ -874,6 +1058,7 @@ class JourneyServiceTest {
       scope = scope,
       service = service,
       eventService = eventService,
+      journeyStore = journeyStore,
       broker = broker,
       presented = presented,
       campaigns = listOf(campaign),

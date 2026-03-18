@@ -77,6 +77,7 @@ interface FlowJourneyHost {
   suspend fun showScreen(screenId: String, transition: JsonElement? = null)
   suspend fun performPurchase(productId: String, placementIndex: Any?)
   suspend fun performRestore()
+  suspend fun performRequestNotifications(journeyId: String?)
   suspend fun performOpenLink(url: String, target: String?)
   suspend fun performDismiss()
   suspend fun performBack(steps: Int?, transition: JsonElement?)
@@ -498,6 +499,11 @@ class FlowJourneyRunner(
           trackAction(action, context, error = null)
           result
         }
+        is InteractionAction.RequestNotifications -> {
+          val result = handleRequestNotifications(action, context)
+          trackAction(action, context, error = null)
+          result
+        }
         is InteractionAction.OpenLink -> {
           val result = handleOpenLink(action, context)
           trackAction(action, context, error = null)
@@ -884,6 +890,14 @@ class FlowJourneyRunner(
 
   private suspend fun handleRestore(action: InteractionAction.Restore, context: RuntimeTriggerContext): ActionResult {
     host?.performRestore()
+    return ActionResult.Continue
+  }
+
+  private suspend fun handleRequestNotifications(
+    action: InteractionAction.RequestNotifications,
+    context: RuntimeTriggerContext,
+  ): ActionResult {
+    host?.performRequestNotifications(journey.id)
     return ActionResult.Continue
   }
 
@@ -1615,6 +1629,7 @@ private val InteractionAction.actionType: String
     is InteractionAction.UpdateCustomer -> "update_customer"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"
+    is InteractionAction.RequestNotifications -> "request_notifications"
     is InteractionAction.OpenLink -> "open_link"
     is InteractionAction.Dismiss -> "dismiss"
     is InteractionAction.CallDelegate -> "call_delegate"

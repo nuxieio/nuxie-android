@@ -5,6 +5,7 @@ import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
 import io.nuxie.sdk.campaigns.EventTriggerConfig
 import io.nuxie.sdk.campaigns.GoalConfig
+import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.events.store.StoredEvent
 import io.nuxie.sdk.ir.IREnvelope
@@ -68,7 +69,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 2.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_000L, result.atEpochMillis)
   }
@@ -119,7 +120,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 5.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_000L, result.atEpochMillis)
   }
@@ -145,7 +146,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 1.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertFalse(result.met)
   }
 
@@ -177,7 +178,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 10.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(now, result.atEpochMillis)
   }
@@ -214,7 +215,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 10.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(now, result.atEpochMillis)
     assertEquals(0, loadEventsCalls)
@@ -291,8 +292,62 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 2.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_500L, result.atEpochMillis)
+  }
+
+  @Test
+  fun transientEventsFeedGeneralAttributeQueries() = runBlocking {
+    val history = InMemoryEventHistoryStore()
+    val anchor = 10_000L
+    val now = 11_000L
+
+    val evaluator = DefaultGoalEvaluator(
+      loadEventsForUser = { distinctId, limit -> history.getEventsForUser(distinctId, limit) },
+      segmentQueries = FakeSegments(emptySet()),
+      featureQueries = null,
+      userProps = null,
+      eventQueries = null,
+      irRuntime = IRRuntime { now },
+      nowEpochMillis = { now },
+    )
+
+    val expr = IREnvelope(
+      irVersion = 1,
+      expr = IRExpr.EventsCount(
+        name = SystemEventNames.notificationsEnabled,
+        within = IRExpr.Duration(60.0),
+        whereExpr = IRExpr.Pred(
+          op = "eq",
+          key = "journey_id",
+          value = IRExpr.JourneyId,
+        ),
+      ),
+    )
+
+    val goal = GoalConfig(kind = GoalConfig.Kind.ATTRIBUTE, attributeExpr = expr, window = 60.0)
+    val camp = campaign(goal)
+    val journey = Journey(
+      campaign = camp,
+      distinctId = "user_1",
+      id = "journey_1",
+      nowEpochMillis = anchor,
+    ).apply {
+      conversionAnchorAtEpochMillis = anchor
+      conversionWindowSeconds = 60.0
+    }
+
+    val transientEvent = StoredEvent(
+      id = "evt_transient_notifications",
+      name = SystemEventNames.notificationsEnabled,
+      distinctId = "user_1",
+      timestampEpochMillis = 10_500L,
+      properties = mapOf("journey_id" to "journey_1"),
+    )
+
+    val result = evaluator.isGoalMet(journey, camp, listOf(transientEvent))
+    assertTrue(result.met)
+    assertEquals(now, result.atEpochMillis)
   }
 }

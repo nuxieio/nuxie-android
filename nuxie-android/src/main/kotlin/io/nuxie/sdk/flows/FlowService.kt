@@ -1,7 +1,6 @@
 package io.nuxie.sdk.flows
 
-import android.app.Activity
-import android.content.Context
+import androidx.activity.ComponentActivity
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.network.NuxieApiProtocol
@@ -65,14 +64,16 @@ class FlowService(
    * Must be called on the main thread (WebView construction).
    */
   suspend fun getFlowView(
-    context: Context,
+    activity: ComponentActivity,
     flowId: String,
+    viewId: Int,
     runtimeDelegate: FlowRuntimeDelegate? = null,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     val flow = fetchFlow(flowId)
     return withContext(Dispatchers.Main.immediate) {
-      FlowView(context).apply {
+      FlowView(activity).apply {
+        id = viewId
         this.runtimeDelegate = runtimeDelegate
         this.colorSchemeMode = colorSchemeMode
         load(
@@ -90,12 +91,18 @@ class FlowService(
    * Convenience for Activity-hosted presentation (used by NuxieFlowActivity).
    */
   suspend fun attachToActivity(
-    activity: Activity,
+    activity: ComponentActivity,
     flowId: String,
     runtimeDelegate: FlowRuntimeDelegate? = null,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
-    return getFlowView(activity, flowId, runtimeDelegate, colorSchemeMode)
+    return getFlowView(
+      activity = activity,
+      flowId = flowId,
+      viewId = io.nuxie.sdk.R.id.nuxie_flow_view,
+      runtimeDelegate = runtimeDelegate,
+      colorSchemeMode = colorSchemeMode,
+    )
   }
 
   suspend fun removeFlows(flowIds: List<String>) {

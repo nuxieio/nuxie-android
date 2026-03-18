@@ -333,6 +333,9 @@ sealed interface InteractionAction {
   data object Restore : InteractionAction
 
   @Serializable
+  data object RequestNotifications : InteractionAction
+
+  @Serializable
   data class OpenLink(
     val url: JsonElement,
     val target: String? = null,
@@ -438,6 +441,7 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       "update_customer" -> input.json.decodeFromJsonElement(InteractionAction.UpdateCustomer.serializer(), el)
       "purchase" -> input.json.decodeFromJsonElement(InteractionAction.Purchase.serializer(), el)
       "restore" -> InteractionAction.Restore
+      "request_notifications" -> InteractionAction.RequestNotifications
       "open_link" -> input.json.decodeFromJsonElement(InteractionAction.OpenLink.serializer(), el)
       "dismiss" -> input.json.decodeFromJsonElement(InteractionAction.Dismiss.serializer(), el)
       "call_delegate" -> input.json.decodeFromJsonElement(InteractionAction.CallDelegate.serializer(), el)
@@ -525,6 +529,7 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
         put("productId", value.productId)
       }
       is InteractionAction.Restore -> encodeWithType("restore") {}
+      is InteractionAction.RequestNotifications -> encodeWithType("request_notifications") {}
       is InteractionAction.OpenLink -> encodeWithType("open_link") {
         put("url", value.url)
         if (value.target != null) put("target", value.target)

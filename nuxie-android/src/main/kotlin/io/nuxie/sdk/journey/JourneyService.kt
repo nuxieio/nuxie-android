@@ -1,6 +1,6 @@
 package io.nuxie.sdk.journey
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
@@ -9,11 +9,13 @@ import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
 import io.nuxie.sdk.events.SystemEventNames
+import io.nuxie.sdk.events.store.StoredEvent
 import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.flows.Flow
 import io.nuxie.sdk.flows.FlowRuntimeDelegate
 import io.nuxie.sdk.flows.FlowService
 import io.nuxie.sdk.flows.FlowView
+import io.nuxie.sdk.flows.NotificationPermissionEventReceiver
 import io.nuxie.sdk.flows.InteractionTrigger
 import io.nuxie.sdk.flows.VmPathRef
 import io.nuxie.sdk.identity.IdentityService
@@ -33,6 +35,7 @@ import io.nuxie.sdk.triggers.SuppressReason
 import io.nuxie.sdk.triggers.TriggerBroker
 import io.nuxie.sdk.triggers.TriggerUpdate
 import io.nuxie.sdk.util.fromJsonElement
+import io.nuxie.sdk.util.Iso8601
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -277,12 +280,17 @@ class JourneyService(
     return startJourneyInternal(campaign, distinctId, originEventId)
   }
 
-  suspend fun createFlowViewForJourney(activity: Activity, flowId: String, journeyId: String): FlowView {
+  suspend fun createFlowViewForJourney(activity: ComponentActivity, flowId: String, journeyId: String): FlowView {
     val delegate = runtimeDelegates[journeyId] ?: FlowRuntimeDelegateAdapter(journeyId, this, scope).also {
       runtimeDelegates[journeyId] = it
     }
 
-    val view = flowService.getFlowView(activity, flowId, runtimeDelegate = delegate)
+    val view = flowService.getFlowView(
+      activity = activity,
+      flowId = flowId,
+      viewId = io.nuxie.sdk.R.id.nuxie_flow_view,
+      runtimeDelegate = delegate,
+    )
     delegate.attachFlowView(view)
     presentedJourneyIds += journeyId
     flowRunners[journeyId]?.attach(delegate)
@@ -351,6 +359,10 @@ class JourneyService(
 
       "action/restore" -> {
         runtimeDelegates[journeyId]?.performRestore()
+      }
+
+      "action/request_notifications" -> {
+        runtimeDelegates[journeyId]?.performRequestNotifications(journey.id)
       }
 
       "action/open_link" -> {
@@ -449,6 +461,76 @@ class JourneyService(
         io.nuxie.sdk.flows.CloseReason.Timeout -> JourneyExitReason.COMPLETED
       }
       completeJourney(journey, exitReason)
+    }
+  }
+
+  suspend fun handleScopedNotificationPermissionEvent(
+    journeyId: String,
+    eventName: String,
+    properties: Map<String, Any?>,
+  ) {
+    val journey = inMemoryJourneysById[journeyId] ?: return
+    val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
+
+    val event = try {
+      eventService.prepareTriggerEvent(
+        event = eventName,
+        properties = properties,
+      )
+    } catch (error: Throwable) {
+      NuxieLogger.warning(
+        "JourneyService: Failed to prepare scoped notification event: ${error.message}",
+        error,
+      )
+      return
+    }
+
+    scope.launch {
+      runCatching {
+        eventService.trackForTrigger(
+          eventName,
+          properties = properties,
+          persistToHistory = false,
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning(
+          "JourneyService: Failed to track scoped notification event: ${error.message}",
+          error,
+        )
+      }
+    }
+
+    val transientEvent = storedEvent(event)
+
+    evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
+    if (!shouldDeferExitDecision(journey.id)) {
+      val exit = exitDecision(journey, campaign)
+      if (exit != null) {
+        completeJourney(journey, exit)
+        return
+      }
+    }
+
+    val pending = journey.flowState.pendingAction
+    if (pending != null && pending.kind == FlowPendingActionKind.WAIT_UNTIL) {
+      val runner = flowRunners[journey.id]
+      if (runner != null) {
+        val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
+        handleOutcome(outcome, journey)
+      }
+      if (journey.status.isLive) {
+        persistJourney(journey)
+      }
+      return
+    }
+
+    val runner = flowRunners[journey.id]
+    if (runner != null) {
+      val outcome = runner.dispatchEventTrigger(event)
+      handleOutcome(outcome, journey)
+    }
+    if (journey.status.isLive) {
+      persistJourney(journey)
     }
   }
 
@@ -816,11 +898,15 @@ class JourneyService(
     completeJourney(journey, JourneyExitReason.CANCELLED)
   }
 
-  private suspend fun evaluateGoalIfNeeded(journey: Journey, campaign: Campaign) {
+  private suspend fun evaluateGoalIfNeeded(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent> = emptyList(),
+  ) {
     if (journey.convertedAtEpochMillis != null) return
     if (journey.goalSnapshot == null) return
 
-    val result = goalEvaluator.isGoalMet(journey, campaign)
+    val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = transientEvents)
     if (result.met && result.atEpochMillis != null) {
       val metAt = result.atEpochMillis
       if (metAt == null) return
@@ -863,6 +949,16 @@ class JourneyService(
 
   private fun shouldDeferExitDecision(journeyId: String): Boolean {
     return presentedJourneyIds.contains(journeyId)
+  }
+
+  private fun storedEvent(event: NuxieEvent): StoredEvent {
+    return StoredEvent(
+      id = event.id,
+      name = event.name,
+      distinctId = event.distinctId,
+      timestampEpochMillis = Iso8601.parseEpochMillis(event.timestamp) ?: nowEpochMillis(),
+      properties = event.properties,
+    )
   }
 
   private suspend fun shouldTriggerFromEvent(campaign: Campaign, event: NuxieEvent): Boolean {
@@ -1035,7 +1131,7 @@ private class FlowRuntimeDelegateAdapter(
   private val journeyId: String,
   private val journeyService: JourneyService,
   private val scope: CoroutineScope,
-) : FlowRuntimeDelegate, FlowJourneyHost {
+) : FlowRuntimeDelegate, FlowJourneyHost, NotificationPermissionEventReceiver {
   @Volatile private var flowView: FlowView? = null
 
   fun attachFlowView(view: FlowView) {
@@ -1070,6 +1166,23 @@ private class FlowRuntimeDelegateAdapter(
   override suspend fun performRestore() {
     journeyService.dispatchRestoreRequested(journeyId)
     flowView?.performRestore()
+  }
+
+  override suspend fun performRequestNotifications(journeyId: String?) {
+    flowView?.performRequestNotifications(journeyId)
+  }
+
+  override fun onNotificationPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>,
+  ) {
+    scope.launch {
+      journeyService.handleScopedNotificationPermissionEvent(
+        journeyId = journeyId,
+        eventName = eventName,
+        properties = properties,
+      )
+    }
   }
 
   override suspend fun performOpenLink(url: String, target: String?) {
