@@ -27,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import io.nuxie.sdk.NuxieSDK
+import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
 import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
@@ -390,7 +391,7 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   init {
     if (id == View.NO_ID) {
-      id = View.generateViewId()
+      id = R.id.nuxie_flow_view
     }
   }
 

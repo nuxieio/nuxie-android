@@ -9,6 +9,7 @@ import android.util.SparseArray
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
+import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -163,9 +164,7 @@ class FlowViewNotificationPermissionTest {
       permissionGranted = false,
       notificationsEnabledAfterRequest = true,
     )
-    val viewId = View.generateViewId()
     val flowView = FlowView(activity).apply {
-      id = viewId
       notificationPermissionHandler = handler
       sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
     }
@@ -178,7 +177,6 @@ class FlowViewNotificationPermissionTest {
 
     val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
     val restoredView = FlowView(activity).apply {
-      id = viewId
       notificationPermissionHandler = handler
       sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
       notificationPermissionEventSink = { event, properties, _ ->
@@ -204,6 +202,8 @@ class FlowViewNotificationPermissionTest {
       ),
       triggered,
     )
+    assertEquals(R.id.nuxie_flow_view, flowView.id)
+    assertEquals(R.id.nuxie_flow_view, restoredView.id)
   }
 
   @Test

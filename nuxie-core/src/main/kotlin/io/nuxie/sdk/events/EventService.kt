@@ -149,6 +149,7 @@ class EventService(
     properties: Map<String, Any?>? = null,
     userProperties: Map<String, Any?>? = null,
     userPropertiesSetOnce: Map<String, Any?>? = null,
+    persistToHistory: Boolean = true,
   ): Pair<NuxieEvent, EventResponse> {
     if (event.isBlank()) {
       throw IllegalArgumentException("Event name cannot be empty")
@@ -187,8 +188,11 @@ class EventService(
       nuxieEvent
     }
 
-    // Store event locally (best-effort) before trigger evaluation continues.
-    runCatching { historyStore.insert(storedEvent(finalEvent)) }
+    // Store event locally (best-effort) before trigger evaluation continues when the
+    // event should participate in shared user event history.
+    if (persistToHistory) {
+      runCatching { historyStore.insert(storedEvent(finalEvent)) }
+    }
 
     val propsJson: JsonObject = toJsonObject(finalEvent.properties)
     val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)

@@ -19,7 +19,11 @@ data class GoalMetResult(
 )
 
 interface GoalEvaluator {
-  suspend fun isGoalMet(journey: Journey, campaign: Campaign): GoalMetResult
+  suspend fun isGoalMet(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent>,
+  ): GoalMetResult
 }
 
 private data class EventOnlyAttributeEvaluation(
@@ -48,16 +52,30 @@ class DefaultGoalEvaluator(
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
 ) : GoalEvaluator {
 
-  override suspend fun isGoalMet(journey: Journey, campaign: Campaign): GoalMetResult {
+  override suspend fun isGoalMet(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent>,
+  ): GoalMetResult {
     val goal = journey.goalSnapshot ?: return GoalMetResult(met = false)
 
     val anchorMs = journey.conversionAnchorAtEpochMillis
 
     return when (goal.kind) {
-      GoalConfig.Kind.EVENT -> evaluateEventGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
+      GoalConfig.Kind.EVENT -> evaluateEventGoal(
+        goal,
+        journey = journey,
+        anchorEpochMillis = anchorMs,
+        transientEvents = transientEvents,
+      )
       GoalConfig.Kind.SEGMENT_ENTER -> evaluateSegmentEnterGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
       GoalConfig.Kind.SEGMENT_LEAVE -> evaluateSegmentLeaveGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
-      GoalConfig.Kind.ATTRIBUTE -> evaluateAttributeGoal(goal, journey = journey, anchorEpochMillis = anchorMs)
+      GoalConfig.Kind.ATTRIBUTE -> evaluateAttributeGoal(
+        goal,
+        journey = journey,
+        anchorEpochMillis = anchorMs,
+        transientEvents = transientEvents,
+      )
     }
   }
 
@@ -65,6 +83,7 @@ class DefaultGoalEvaluator(
     goal: GoalConfig,
     journey: Journey,
     anchorEpochMillis: Long,
+    transientEvents: List<StoredEvent> = emptyList(),
   ): GoalMetResult {
     val eventName = goal.eventName ?: return GoalMetResult(met = false)
 
@@ -76,6 +95,7 @@ class DefaultGoalEvaluator(
       filter = goal.eventFilter,
       journey = journey,
       anchorEpochMillis = anchorEpochMillis,
+      additionalEvents = transientEvents,
     )
     return if (last != null) GoalMetResult(met = true, atEpochMillis = last) else GoalMetResult(met = false)
   }
@@ -119,6 +139,7 @@ class DefaultGoalEvaluator(
     goal: GoalConfig,
     journey: Journey,
     anchorEpochMillis: Long,
+    transientEvents: List<StoredEvent> = emptyList(),
   ): GoalMetResult {
     val expr = goal.attributeExpr ?: return GoalMetResult(met = false)
 
@@ -126,6 +147,7 @@ class DefaultGoalEvaluator(
       expr = expr.expr,
       journey = journey,
       anchorEpochMillis = anchorEpochMillis,
+      transientEvents = transientEvents,
     )?.let { result ->
       return if (result.met) {
         GoalMetResult(met = true, atEpochMillis = result.atEpochMillis)
@@ -172,19 +194,24 @@ class DefaultGoalEvaluator(
     journey: Journey,
     anchorEpochMillis: Long,
     allEvents: List<StoredEvent>? = null,
+    additionalEvents: List<StoredEvent> = emptyList(),
   ): Long? {
     val windowEndMs = windowEndEpochMillis(journey, anchorEpochMillis)
+    val events = mergeEvents(
+      primary = allEvents ?: loadEventsForUser(journey.distinctId, 1_000),
+      secondary = additionalEvents,
+    )
 
     if (filter == null) {
       return getLastEventTime(
         name = name,
-        distinctId = journey.distinctId,
+        events = events,
         sinceEpochMillis = anchorEpochMillis,
         untilEpochMillis = windowEndMs,
       )
     }
 
-    val matchingEvents = (allEvents ?: loadEventsForUser(journey.distinctId, 1_000)).asSequence()
+    val matchingEvents = events.asSequence()
       .filter { it.name == name }
       .filter { ev ->
         if (ev.timestampEpochMillis < anchorEpochMillis) return@filter false
@@ -224,11 +251,15 @@ class DefaultGoalEvaluator(
     journey: Journey,
     anchorEpochMillis: Long,
     eventCache: EventHistoryCache = EventHistoryCache(),
+    transientEvents: List<StoredEvent> = emptyList(),
   ): EventOnlyAttributeEvaluation? {
     suspend fun getCachedEvents(): List<StoredEvent> {
       val existing = eventCache.events
       if (existing != null) return existing
-      return loadEventsForUser(journey.distinctId, 1_000).also {
+      return mergeEvents(
+        primary = loadEventsForUser(journey.distinctId, 1_000),
+        secondary = transientEvents,
+      ).also {
         eventCache.events = it
       }
     }
@@ -241,6 +272,7 @@ class DefaultGoalEvaluator(
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
             eventCache = eventCache,
+            transientEvents = transientEvents,
           ) ?: return null
         }
         if (results.all { it.met }) {
@@ -260,6 +292,7 @@ class DefaultGoalEvaluator(
             journey = journey,
             anchorEpochMillis = anchorEpochMillis,
             eventCache = eventCache,
+            transientEvents = transientEvents,
           ) ?: return null
         }
         val metTimes = results.filter { it.met }.mapNotNull { it.atEpochMillis }
@@ -297,11 +330,10 @@ class DefaultGoalEvaluator(
 
   private suspend fun getLastEventTime(
     name: String,
-    distinctId: String,
+    events: List<StoredEvent>,
     sinceEpochMillis: Long,
     untilEpochMillis: Long?,
   ): Long? {
-    val events = loadEventsForUser(distinctId, 1_000)
     return events.asSequence()
       .filter { it.name == name }
       .filter { ev ->
@@ -310,5 +342,14 @@ class DefaultGoalEvaluator(
         true
       }
       .maxOfOrNull { it.timestampEpochMillis }
+  }
+
+  private fun mergeEvents(
+    primary: List<StoredEvent>,
+    secondary: List<StoredEvent>,
+  ): List<StoredEvent> {
+    if (secondary.isEmpty()) return primary
+    return (primary + secondary)
+      .distinctBy { it.id }
   }
 }

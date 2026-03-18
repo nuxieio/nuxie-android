@@ -9,6 +9,7 @@ import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
 import io.nuxie.sdk.events.SystemEventNames
+import io.nuxie.sdk.events.store.StoredEvent
 import io.nuxie.sdk.features.FeatureService
 import io.nuxie.sdk.flows.Flow
 import io.nuxie.sdk.flows.FlowRuntimeDelegate
@@ -34,6 +35,7 @@ import io.nuxie.sdk.triggers.SuppressReason
 import io.nuxie.sdk.triggers.TriggerBroker
 import io.nuxie.sdk.triggers.TriggerUpdate
 import io.nuxie.sdk.util.fromJsonElement
+import io.nuxie.sdk.util.Iso8601
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -465,7 +467,11 @@ class JourneyService(
     val journey = inMemoryJourneysById[journeyId] ?: return
     val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
     val event = runCatching {
-      eventService.trackForTrigger(eventName, properties = properties).first
+      eventService.trackForTrigger(
+        eventName,
+        properties = properties,
+        persistToHistory = false,
+      ).first
     }.getOrElse { error ->
       NuxieLogger.warning(
         "JourneyService: Failed to track scoped notification event: ${error.message}",
@@ -477,8 +483,9 @@ class JourneyService(
         properties = properties,
       )
     }
+    val transientEvent = storedEvent(event)
 
-    evaluateGoalIfNeeded(journey, campaign)
+    evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
     if (!shouldDeferExitDecision(journey.id)) {
       val exit = exitDecision(journey, campaign)
       if (exit != null) {
@@ -874,11 +881,15 @@ class JourneyService(
     completeJourney(journey, JourneyExitReason.CANCELLED)
   }
 
-  private suspend fun evaluateGoalIfNeeded(journey: Journey, campaign: Campaign) {
+  private suspend fun evaluateGoalIfNeeded(
+    journey: Journey,
+    campaign: Campaign,
+    transientEvents: List<StoredEvent> = emptyList(),
+  ) {
     if (journey.convertedAtEpochMillis != null) return
     if (journey.goalSnapshot == null) return
 
-    val result = goalEvaluator.isGoalMet(journey, campaign)
+    val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = transientEvents)
     if (result.met && result.atEpochMillis != null) {
       val metAt = result.atEpochMillis
       if (metAt == null) return
@@ -921,6 +932,16 @@ class JourneyService(
 
   private fun shouldDeferExitDecision(journeyId: String): Boolean {
     return presentedJourneyIds.contains(journeyId)
+  }
+
+  private fun storedEvent(event: NuxieEvent): StoredEvent {
+    return StoredEvent(
+      id = event.id,
+      name = event.name,
+      distinctId = event.distinctId,
+      timestampEpochMillis = Iso8601.parseEpochMillis(event.timestamp) ?: nowEpochMillis(),
+      properties = event.properties,
+    )
   }
 
   private suspend fun shouldTriggerFromEvent(campaign: Campaign, event: NuxieEvent): Boolean {

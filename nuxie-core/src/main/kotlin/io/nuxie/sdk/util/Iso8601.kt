@@ -21,5 +21,8 @@ object Iso8601 {
   fun now(): String = formatEpochMillis(System.currentTimeMillis())
 
   fun formatEpochMillis(epochMillis: Long): String = formatter.get().format(Date(epochMillis))
-}
 
+  fun parseEpochMillis(value: String): Long? {
+    return runCatching { formatter.get().parse(value)?.time }.getOrNull()
+  }
+}

@@ -68,7 +68,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 2.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_000L, result.atEpochMillis)
   }
@@ -119,7 +119,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 5.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_000L, result.atEpochMillis)
   }
@@ -145,7 +145,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 1.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertFalse(result.met)
   }
 
@@ -177,7 +177,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 10.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(now, result.atEpochMillis)
   }
@@ -214,7 +214,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 10.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(now, result.atEpochMillis)
     assertEquals(0, loadEventsCalls)
@@ -291,7 +291,7 @@ class GoalEvaluatorTest {
       conversionWindowSeconds = 2.0
     }
 
-    val result = evaluator.isGoalMet(journey, camp)
+    val result = evaluator.isGoalMet(journey, camp, emptyList())
     assertTrue(result.met)
     assertEquals(11_500L, result.atEpochMillis)
   }

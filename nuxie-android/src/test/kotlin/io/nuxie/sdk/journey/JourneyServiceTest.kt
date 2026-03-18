@@ -697,9 +697,16 @@ class JourneyServiceTest {
       )
       delay(80)
 
-      val active = harness.service.getActiveJourneys("user_1")
-      assertEquals(2, active.size)
-      val activeById = active.associateBy { it.id }
+      val historyAfterScopedEvent = harness.eventService.getEventsForUser("user_1", limit = 100)
+      assertTrue(historyAfterScopedEvent.none { it.name == SystemEventNames.notificationsEnabled })
+
+      harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_noop", name = "noop", distinctId = "user_1")
+      )
+      delay(80)
+
+      val activeById = harness.service.getActiveJourneys("user_1").associateBy { it.id }
+      assertEquals(2, activeById.size)
       assertNotNull(activeById[started.id])
       assertNotNull(activeById[resumedJourneyId])
       assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
