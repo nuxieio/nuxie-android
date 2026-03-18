@@ -87,7 +87,7 @@ Important `TriggerDecision` values:
 | API | Description |
 | --- | --- |
 | `fun showFlow(flowId: String)` | Presents flow in SDK-managed `NuxieFlowActivity`. Requires foreground host activity. |
-| `suspend fun getFlowView(activity: Activity, flowId: String): FlowView` | Returns `FlowView` for custom host UI (Activity/Fragment/Compose). |
+| `suspend fun getFlowView(activity: ComponentActivity, flowId: String): FlowView` | Returns `FlowView` for custom host UI (`ComponentActivity`/Fragment/Compose). |
 
 ### Flow Runtime Interaction Semantics
 
