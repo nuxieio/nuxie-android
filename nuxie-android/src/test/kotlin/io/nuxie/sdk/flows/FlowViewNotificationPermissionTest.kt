@@ -134,6 +134,32 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestNotifications_standaloneFlowRoutesResultToRuntimeOnly() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeNotificationPermissionHandler(
+      notificationsEnabled = true,
+      permissionGranted = true,
+    )
+    val flowView = FlowView(activity).apply {
+      notificationPermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    val runtimeEvents = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.notificationPermissionRuntimeEventSink = { event, properties ->
+      runtimeEvents += event to properties
+    }
+
+    flowView.performRequestNotifications()
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(SystemEventNames.notificationsEnabled to null),
+      runtimeEvents,
+    )
+  }
+
+  @Test
   fun requestNotifications_routesJourneyScopedResultsToDelegateReceiver() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeNotificationPermissionHandler(

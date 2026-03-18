@@ -375,6 +375,14 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var pendingNotificationPermissionJourneyId: String? = null
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
+  internal var notificationPermissionRuntimeEventSink:
+    (eventName: String, properties: Map<String, Any?>?) -> Unit =
+    { eventName, properties ->
+      sendNotificationPermissionEventToRuntime(
+        eventName = eventName,
+        properties = properties,
+      )
+    }
   internal var notificationPermissionEventSink:
     (eventName: String, properties: Map<String, Any?>?, journeyId: String?) -> Unit =
     { eventName, properties, journeyId ->
@@ -881,11 +889,7 @@ class FlowView(context: Context) : FrameLayout(context) {
       return
     }
 
-    sendNotificationPermissionEventToRuntime(
-      eventName = eventName,
-      properties = properties,
-    )
-    NuxieSDK.shared().trigger(eventName, properties = properties)
+    notificationPermissionRuntimeEventSink(eventName, properties)
   }
 
   private fun sendNotificationPermissionEventToRuntime(
