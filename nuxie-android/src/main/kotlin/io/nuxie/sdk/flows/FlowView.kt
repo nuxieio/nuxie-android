@@ -1,12 +1,15 @@
 package io.nuxie.sdk.flows
 
 import android.Manifest
+import android.app.Activity
+import android.app.Fragment
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
@@ -43,7 +46,7 @@ internal interface NotificationPermissionHandler {
   fun areNotificationsEnabled(context: Context): Boolean
   fun isPostNotificationsPermissionGranted(context: Context): Boolean
   fun requestPostNotificationsPermission(
-    activity: ComponentActivity,
+    activity: Activity,
     onResult: (Boolean) -> Unit,
   ): Boolean
 }
@@ -61,6 +64,17 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
   }
 
   override fun requestPostNotificationsPermission(
+    activity: Activity,
+    onResult: (Boolean) -> Unit,
+  ): Boolean {
+    return if (activity is ComponentActivity) {
+      requestWithActivityResultRegistry(activity, onResult)
+    } else {
+      LegacyNotificationPermissionFragment.request(activity, onResult)
+    }
+  }
+
+  private fun requestWithActivityResultRegistry(
     activity: ComponentActivity,
     onResult: (Boolean) -> Unit,
   ): Boolean {
@@ -78,6 +92,72 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
     }.onFailure {
       NuxieLogger.warning("FlowView: Failed to request notification permission: ${it.message}", it)
     }.isSuccess
+  }
+}
+
+@Suppress("DEPRECATION")
+private class LegacyNotificationPermissionFragment : Fragment() {
+  private var onResult: ((Boolean) -> Unit)? = null
+  private var didRequestPermission: Boolean = false
+
+  fun startRequest(onResult: (Boolean) -> Unit) {
+    this.onResult = onResult
+    if (didRequestPermission || !isAdded) return
+    didRequestPermission = true
+    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_CODE)
+  }
+
+  override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray,
+  ) {
+    if (requestCode != REQUEST_CODE) {
+      super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+      return
+    }
+
+    val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+    onResult?.invoke(granted)
+    onResult = null
+    activity?.fragmentManager?.beginTransaction()?.remove(this)?.commitAllowingStateLoss()
+  }
+
+  companion object {
+    private const val TAG = "io.nuxie.sdk.notifications.permission"
+    private const val REQUEST_CODE = 41073
+
+    fun request(
+      activity: Activity,
+      onResult: (Boolean) -> Unit,
+    ): Boolean {
+      if (activity.isFinishing) {
+        return false
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && activity.isDestroyed) {
+        return false
+      }
+
+      val manager = activity.fragmentManager
+      if (manager.findFragmentByTag(TAG) != null) {
+        return false
+      }
+
+      return runCatching {
+        val fragment =
+          LegacyNotificationPermissionFragment().also {
+            manager.beginTransaction().add(it, TAG).commitAllowingStateLoss()
+            manager.executePendingTransactions()
+          }
+
+        fragment.startRequest(onResult)
+      }.onFailure {
+        NuxieLogger.warning(
+          "FlowView: Failed to request notification permission from Activity host: ${it.message}",
+          it,
+        )
+      }.isSuccess
+    }
   }
 }
 
@@ -515,10 +595,10 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     if (!permissionGranted) {
-      val activity = findComponentActivity(context)
+      val activity = findActivity(context)
       if (activity == null) {
         NuxieLogger.warning(
-          "FlowView: Notification permission prompt requires a ComponentActivity host; emitting denied",
+          "FlowView: Notification permission prompt requires an Activity host; emitting denied",
         )
         emitDenied()
         return
@@ -555,15 +635,15 @@ class FlowView(context: Context) : FrameLayout(context) {
     triggerEvent(eventName, properties)
   }
 
-  private fun findComponentActivity(context: Context): ComponentActivity? {
+  private fun findActivity(context: Context): Activity? {
     var current: Context? = context
     while (current is ContextWrapper) {
-      if (current is ComponentActivity) {
+      if (current is Activity) {
         return current
       }
       current = current.baseContext
     }
-    return current as? ComponentActivity
+    return current as? Activity
   }
 
   private fun openLinkInternal(urlString: String, target: String?) {

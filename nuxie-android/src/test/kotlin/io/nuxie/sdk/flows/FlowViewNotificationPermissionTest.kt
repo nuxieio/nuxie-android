@@ -1,5 +1,6 @@
 package io.nuxie.sdk.flows
 
+import android.app.Activity
 import android.content.Context
 import android.os.Build
 import android.os.Looper
@@ -8,7 +9,6 @@ import androidx.test.core.app.ApplicationProvider
 import io.nuxie.sdk.events.SystemEventNames
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -69,26 +69,30 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
-  fun requestNotifications_emitsDeniedWhenPromptNeedsComponentActivityHost() {
-    val context = ApplicationProvider.getApplicationContext<Context>()
+  fun requestNotifications_requestsPermissionOnPlainActivityHostAndEmitsEnabled() {
+    val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
     val handler = FakeNotificationPermissionHandler(
       notificationsEnabled = false,
       permissionGranted = false,
+      requestBehavior = { callback ->
+        callback(true)
+        true
+      },
+      notificationsEnabledAfterRequest = true,
     )
-    val flowView = FlowView(context).apply {
+    val flowView = FlowView(activity).apply {
       notificationPermissionHandler = handler
       sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
     }
 
-    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
-    flowView.triggerEvent = { event, properties -> triggered += event to properties }
+    val triggered = mutableListOf<String>()
+    flowView.triggerEvent = { event, _ -> triggered += event }
 
     flowView.performRequestNotifications("journey_1")
     shadowOf(Looper.getMainLooper()).idle()
 
-    assertEquals(0, handler.requestInvocations)
-    assertEquals(SystemEventNames.notificationsDenied, triggered.first().first)
-    assertEquals("journey_1", triggered.first().second?.get("journey_id"))
+    assertEquals(1, handler.requestInvocations)
+    assertEquals(listOf(SystemEventNames.notificationsEnabled), triggered)
   }
 
   @Test
@@ -132,7 +136,7 @@ private class FakeNotificationPermissionHandler(
   }
 
   override fun requestPostNotificationsPermission(
-    activity: ComponentActivity,
+    activity: Activity,
     onResult: (Boolean) -> Unit,
   ): Boolean {
     requestInvocations += 1
