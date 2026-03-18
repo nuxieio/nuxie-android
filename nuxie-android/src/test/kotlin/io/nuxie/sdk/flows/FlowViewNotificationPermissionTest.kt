@@ -7,8 +7,10 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.test.core.app.ApplicationProvider
 import io.nuxie.sdk.events.SystemEventNames
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -30,7 +32,9 @@ class FlowViewNotificationPermissionTest {
     }
 
     val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
-    flowView.triggerEvent = { event, properties -> triggered += event to properties }
+    flowView.notificationPermissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
 
     flowView.performRequestNotifications("journey_1")
     shadowOf(Looper.getMainLooper()).idle()
@@ -59,7 +63,7 @@ class FlowViewNotificationPermissionTest {
     }
 
     val triggered = mutableListOf<String>()
-    flowView.triggerEvent = { event, _ -> triggered += event }
+    flowView.notificationPermissionEventSink = { event, _, _ -> triggered += event }
 
     flowView.performRequestNotifications("journey_1")
     shadowOf(Looper.getMainLooper()).idle()
@@ -86,7 +90,7 @@ class FlowViewNotificationPermissionTest {
     }
 
     val triggered = mutableListOf<String>()
-    flowView.triggerEvent = { event, _ -> triggered += event }
+    flowView.notificationPermissionEventSink = { event, _, _ -> triggered += event }
 
     flowView.performRequestNotifications("journey_1")
     shadowOf(Looper.getMainLooper()).idle()
@@ -108,7 +112,9 @@ class FlowViewNotificationPermissionTest {
     }
 
     val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
-    flowView.triggerEvent = { event, properties -> triggered += event to properties }
+    flowView.notificationPermissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
 
     flowView.performRequestNotifications()
     shadowOf(Looper.getMainLooper()).idle()
@@ -116,6 +122,52 @@ class FlowViewNotificationPermissionTest {
     assertEquals(1, triggered.size)
     assertEquals(SystemEventNames.notificationsDenied, triggered.first().first)
     assertNull(triggered.first().second)
+  }
+
+  @Test
+  fun requestNotifications_routesJourneyScopedResultsToDelegateReceiver() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeNotificationPermissionHandler(
+      notificationsEnabled = true,
+      permissionGranted = true,
+    )
+    val receiver = FakeNotificationPermissionEventReceiver()
+    val flowView = FlowView(activity).apply {
+      notificationPermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+      runtimeDelegate = receiver
+    }
+
+    flowView.performRequestNotifications("journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.notificationsEnabled to mapOf("journey_id" to "journey_1"),
+      ),
+      receiver.events,
+    )
+    assertTrue(receiver.runtimeMessages.isEmpty())
+  }
+}
+
+private class FakeNotificationPermissionEventReceiver :
+  FlowRuntimeDelegate,
+  NotificationPermissionEventReceiver {
+  val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+  val runtimeMessages = mutableListOf<Triple<String, JsonObject, String?>>()
+
+  override fun onRuntimeMessage(type: String, payload: JsonObject, id: String?) {
+    runtimeMessages += Triple(type, payload, id)
+  }
+
+  override fun onDismissRequested(reason: CloseReason) = Unit
+
+  override fun onNotificationPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>,
+  ) {
+    events += eventName to properties
   }
 }
 

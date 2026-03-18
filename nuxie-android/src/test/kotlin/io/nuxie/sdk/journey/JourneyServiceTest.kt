@@ -622,6 +622,41 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedNotificationPermissionEvent_onlyAdvancesTheRequestingJourney() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = SystemEventNames.notificationsEnabled,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = listOf("evt_scope_1", "evt_scope_2").map { eventId ->
+        harness.service.handleEventForTrigger(
+          NuxieEvent(id = eventId, name = "paywall_trigger", distinctId = "user_1")
+        ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+      }
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.first().id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.first().id),
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.last().id, active.first().id)
+      assertTrue(active.first().goalMet != true)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun runtimeDismiss_forwardsDismissedCallbackWithReasonAndError() = runBlocking {
     val dismissCalls = mutableListOf<DismissCall>()
     val harness = newHarness(

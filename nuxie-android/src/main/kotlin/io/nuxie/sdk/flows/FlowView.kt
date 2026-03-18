@@ -30,6 +30,7 @@ import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.purchases.NuxiePurchaseDelegate
 import io.nuxie.sdk.purchases.PurchaseResult
 import io.nuxie.sdk.purchases.RestoreResult
+import io.nuxie.sdk.util.toJsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,6 +50,13 @@ internal interface NotificationPermissionHandler {
     activity: Activity,
     onResult: (Boolean) -> Unit,
   ): Boolean
+}
+
+internal interface NotificationPermissionEventReceiver {
+  fun onNotificationPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>,
+  )
 }
 
 internal class DefaultNotificationPermissionHandler : NotificationPermissionHandler {
@@ -193,9 +201,15 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var bundleStore: FlowBundleStore? = null
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
-  internal var triggerEvent: (String, Map<String, Any?>?) -> Unit = { event, properties ->
-    NuxieSDK.shared().trigger(event, properties = properties)
-  }
+  internal var notificationPermissionEventSink:
+    (eventName: String, properties: Map<String, Any?>?, journeyId: String?) -> Unit =
+    { eventName, properties, journeyId ->
+      dispatchNotificationPermissionEvent(
+        eventName = eventName,
+        properties = properties,
+        journeyId = journeyId,
+      )
+    }
 
   private data class SafeAreaInsets(
     val top: Int,
@@ -574,8 +588,20 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   private fun handleRequestNotifications(journeyId: String?) {
     val properties = buildNotificationEventProperties(journeyId)
-    val emitEnabled = { emitNotificationPermissionEvent(SystemEventNames.notificationsEnabled, properties) }
-    val emitDenied = { emitNotificationPermissionEvent(SystemEventNames.notificationsDenied, properties) }
+    val emitEnabled = {
+      emitNotificationPermissionEvent(
+        SystemEventNames.notificationsEnabled,
+        properties,
+        journeyId,
+      )
+    }
+    val emitDenied = {
+      emitNotificationPermissionEvent(
+        SystemEventNames.notificationsDenied,
+        properties,
+        journeyId,
+      )
+    }
 
     if (sdkIntProvider() < Build.VERSION_CODES.TIRAMISU) {
       if (notificationPermissionHandler.areNotificationsEnabled(context)) {
@@ -631,8 +657,49 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun emitNotificationPermissionEvent(
     eventName: String,
     properties: Map<String, Any?>?,
+    journeyId: String?,
   ) {
-    triggerEvent(eventName, properties)
+    notificationPermissionEventSink(eventName, properties, journeyId)
+  }
+
+  private fun dispatchNotificationPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>?,
+    journeyId: String?,
+  ) {
+    val scopedProperties = properties ?: emptyMap()
+    val receiver = runtimeDelegate as? NotificationPermissionEventReceiver
+    if (!journeyId.isNullOrBlank() && receiver != null) {
+      receiver.onNotificationPermissionEvent(
+        eventName = eventName,
+        properties = scopedProperties,
+      )
+      return
+    }
+
+    sendNotificationPermissionEventToRuntime(
+      eventName = eventName,
+      properties = properties,
+    )
+    NuxieSDK.shared().trigger(eventName, properties = properties)
+  }
+
+  private fun sendNotificationPermissionEventToRuntime(
+    eventName: String,
+    properties: Map<String, Any?>?,
+  ) {
+    if (!::webView.isInitialized) return
+
+    val payload = buildMap<String, Any?> {
+      put("name", eventName)
+      if (!properties.isNullOrEmpty()) {
+        put("properties", properties)
+      }
+    }
+    webView.sendBridgeMessage(
+      type = "action/event",
+      payload = toJsonObject(payload),
+    )
   }
 
   private fun findActivity(context: Context): Activity? {
