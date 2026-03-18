@@ -131,6 +131,54 @@ internal object NotificationPermissionRequestRegistry {
   }
 }
 
+@Suppress("DEPRECATION")
+internal object FlowViewHostStateRegistry {
+  private const val TAG = "io.nuxie.sdk.flow.host.state"
+
+  fun acquireStableViewId(activity: Activity): Int {
+    return retainedFragment(activity).acquireStableViewId(activity)
+  }
+
+  private fun retainedFragment(activity: Activity): FlowViewHostStateFragment {
+    val manager = activity.fragmentManager
+    val existing = manager.findFragmentByTag(TAG) as? FlowViewHostStateFragment
+    if (existing != null) {
+      return existing
+    }
+
+    val fragment = FlowViewHostStateFragment()
+    manager.beginTransaction().add(fragment, TAG).commitAllowingStateLoss()
+    manager.executePendingTransactions()
+    return fragment
+  }
+}
+
+@Suppress("DEPRECATION")
+internal class FlowViewHostStateFragment : Fragment() {
+  private var hostIdentityToken: Int? = null
+  private var nextAllocationIndex: Int = 0
+  private val stableViewIds: MutableList<Int> = mutableListOf()
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    retainInstance = true
+  }
+
+  fun acquireStableViewId(activity: Activity): Int {
+    val currentToken = System.identityHashCode(activity)
+    if (hostIdentityToken != currentToken) {
+      hostIdentityToken = currentToken
+      nextAllocationIndex = 0
+    }
+
+    while (stableViewIds.size <= nextAllocationIndex) {
+      stableViewIds += View.generateViewId()
+    }
+
+    return stableViewIds[nextAllocationIndex++]
+  }
+}
+
 internal class DefaultNotificationPermissionHandler : NotificationPermissionHandler {
   private val activityResultLaunchers:
     MutableMap<ComponentActivity, MutableMap<String, ActivityResultLauncher<String>>> = WeakHashMap()

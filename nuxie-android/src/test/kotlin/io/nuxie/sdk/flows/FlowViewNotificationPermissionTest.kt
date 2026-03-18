@@ -289,6 +289,26 @@ class FlowViewNotificationPermissionTest {
     assertNotEquals(View.NO_ID, second.id)
     assertNotEquals(first.id, second.id)
   }
+
+  @Test
+  fun flowViewHostStateRegistry_reusesStableUniqueIdsAcrossActivityRecreation() {
+    val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup()
+    val firstActivity = controller.get()
+
+    val firstId = FlowViewHostStateRegistry.acquireStableViewId(firstActivity)
+    val secondId = FlowViewHostStateRegistry.acquireStableViewId(firstActivity)
+
+    assertNotEquals(firstId, secondId)
+
+    controller.recreate()
+    val recreatedActivity = controller.get()
+
+    val recreatedFirstId = FlowViewHostStateRegistry.acquireStableViewId(recreatedActivity)
+    val recreatedSecondId = FlowViewHostStateRegistry.acquireStableViewId(recreatedActivity)
+
+    assertEquals(firstId, recreatedFirstId)
+    assertEquals(secondId, recreatedSecondId)
+  }
 }
 
 private class FakeNotificationPermissionEventReceiver :

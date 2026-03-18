@@ -73,6 +73,9 @@ class FlowService(
     val flow = fetchFlow(flowId)
     return withContext(Dispatchers.Main.immediate) {
       FlowView(context).apply {
+        if (context is Activity) {
+          id = FlowViewHostStateRegistry.acquireStableViewId(context)
+        }
         this.runtimeDelegate = runtimeDelegate
         this.colorSchemeMode = colorSchemeMode
         load(

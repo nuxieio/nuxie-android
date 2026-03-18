@@ -71,6 +71,7 @@ class JourneyServiceTest {
   private class FakeApi(
     private val profile: ProfileResponse,
     private val remoteFlow: RemoteFlow,
+    private val trackDelayMillis: Long = 0,
   ) : NuxieApiProtocol {
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
@@ -83,7 +84,12 @@ class JourneyServiceTest {
       value: Double?,
       entityId: String?,
       timestamp: String,
-    ): EventResponse = EventResponse(status = "ok")
+    ): EventResponse {
+      if (trackDelayMillis > 0) {
+        delay(trackDelayMillis)
+      }
+      return EventResponse(status = "ok")
+    }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
@@ -717,6 +723,47 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      trackDelayMillis = 750,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_wait", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      started.flowState.pendingAction = FlowPendingAction(
+        interactionId = "wait_notifications",
+        screenId = null,
+        componentId = null,
+        actionIndex = 0,
+        kind = FlowPendingActionKind.WAIT_UNTIL,
+        resumeAtEpochMillis = null,
+        condition = null,
+        maxTimeMs = null,
+        startedAtEpochMillis = System.currentTimeMillis(),
+        resumeActions = listOf(InteractionAction.Exit(reason = "completed")),
+      )
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun runtimeDismiss_forwardsDismissedCallbackWithReasonAndError() = runBlocking {
     val dismissCalls = mutableListOf<DismissCall>()
     val harness = newHarness(
@@ -849,6 +896,7 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
+    trackDelayMillis: Long = 0,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
@@ -894,7 +942,7 @@ class JourneyServiceTest {
       )
     )
 
-    val api = FakeApi(profile = profile, remoteFlow = remoteFlow)
+    val api = FakeApi(profile = profile, remoteFlow = remoteFlow, trackDelayMillis = trackDelayMillis)
     val config = NuxieConfiguration("test_key")
     val queueStore = InMemoryEventQueueStore()
     val historyStore = InMemoryEventHistoryStore()

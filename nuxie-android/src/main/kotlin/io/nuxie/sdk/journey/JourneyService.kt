@@ -466,15 +466,15 @@ class JourneyService(
   ) {
     val journey = inMemoryJourneysById[journeyId] ?: return
     val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
+
     val event = runCatching {
-      eventService.trackForTrigger(
-        eventName,
+      eventService.prepareTriggerEvent(
+        event = eventName,
         properties = properties,
-        persistToHistory = false,
-      ).first
+      )
     }.getOrElse { error ->
       NuxieLogger.warning(
-        "JourneyService: Failed to track scoped notification event: ${error.message}",
+        "JourneyService: Failed to prepare scoped notification event: ${error.message}",
         error,
       )
       NuxieEvent(
@@ -483,6 +483,22 @@ class JourneyService(
         properties = properties,
       )
     }
+
+    scope.launch {
+      runCatching {
+        eventService.trackForTrigger(
+          eventName,
+          properties = properties,
+          persistToHistory = false,
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning(
+          "JourneyService: Failed to track scoped notification event: ${error.message}",
+          error,
+        )
+      }
+    }
+
     val transientEvent = storedEvent(event)
 
     evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
