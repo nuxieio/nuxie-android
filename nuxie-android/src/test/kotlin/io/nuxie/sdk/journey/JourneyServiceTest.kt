@@ -673,23 +673,37 @@ class JourneyServiceTest {
 
     try {
       harness.service.initialize()
-      val started = listOf("evt_scope_1", "evt_scope_2").map { eventId ->
-        harness.service.handleEventForTrigger(
-          NuxieEvent(id = eventId, name = "paywall_trigger", distinctId = "user_1")
-        ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
-      }
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_1", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+      val resumedJourneyId = "journey_scope_2"
+      harness.service.resumeFromServerState(
+        journeys = listOf(
+          ActiveJourney(
+            sessionId = resumedJourneyId,
+            campaignId = "camp_1",
+            currentNodeId = "screen_1",
+            context = JsonObject(emptyMap()),
+          )
+        ),
+        campaigns = harness.campaigns,
+      )
+      delay(80)
 
       harness.service.handleScopedNotificationPermissionEvent(
-        journeyId = started.first().id,
+        journeyId = started.id,
         eventName = SystemEventNames.notificationsEnabled,
-        properties = mapOf("journey_id" to started.first().id),
+        properties = mapOf("journey_id" to started.id),
       )
       delay(80)
 
       val active = harness.service.getActiveJourneys("user_1")
-      assertEquals(1, active.size)
-      assertEquals(started.last().id, active.first().id)
-      assertTrue(active.first().goalMet != true)
+      assertEquals(2, active.size)
+      val activeById = active.associateBy { it.id }
+      assertNotNull(activeById[started.id])
+      assertNotNull(activeById[resumedJourneyId])
+      assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
+      assertTrue(activeById[resumedJourneyId]?.convertedAtEpochMillis == null)
     } finally {
       harness.close()
     }

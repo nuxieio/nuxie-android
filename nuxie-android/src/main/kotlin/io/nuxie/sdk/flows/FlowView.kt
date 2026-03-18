@@ -408,10 +408,14 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   override fun onRestoreInstanceState(state: Parcelable?) {
-    val savedState = state as? SavedState
-    super.onRestoreInstanceState(savedState?.superState ?: state)
-    pendingNotificationPermissionRequestId = savedState?.pendingNotificationPermissionRequestId
-    pendingNotificationPermissionJourneyId = savedState?.pendingNotificationPermissionJourneyId
+    if (state !is SavedState) {
+      super.onRestoreInstanceState(state)
+      return
+    }
+
+    super.onRestoreInstanceState(state.superState)
+    pendingNotificationPermissionRequestId = state.pendingNotificationPermissionRequestId
+    pendingNotificationPermissionJourneyId = state.pendingNotificationPermissionJourneyId
     rebindPendingNotificationPermissionRequestIfNeeded()
   }
 
