@@ -23,8 +23,6 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import io.nuxie.sdk.NuxieSDK
 import io.nuxie.sdk.R
 import io.nuxie.sdk.events.SystemEventNames
@@ -127,33 +125,6 @@ internal object NotificationPermissionRequestRegistry {
       pendingResults.clear()
       inFlightRequestIds.clear()
     }
-  }
-}
-
-internal object FlowViewHostStateRegistry {
-  fun acquireStableViewId(activity: ComponentActivity): Int {
-    val viewModel = ViewModelProvider(activity)[FlowViewHostStateViewModel::class.java]
-    return viewModel.acquireStableViewId(activity)
-  }
-}
-
-internal class FlowViewHostStateViewModel : ViewModel() {
-  private var hostIdentityToken: Int? = null
-  private var nextAllocationIndex: Int = 0
-  private val stableViewIds: MutableList<Int> = mutableListOf()
-
-  fun acquireStableViewId(activity: ComponentActivity): Int {
-    val currentToken = System.identityHashCode(activity)
-    if (hostIdentityToken != currentToken) {
-      hostIdentityToken = currentToken
-      nextAllocationIndex = 0
-    }
-
-    while (stableViewIds.size <= nextAllocationIndex) {
-      stableViewIds += View.generateViewId()
-    }
-
-    return stableViewIds[nextAllocationIndex++]
   }
 }
 

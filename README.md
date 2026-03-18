@@ -131,11 +131,15 @@ This requires a foreground host `Activity`.
 ### B. Get a `FlowView` for custom host surfaces
 
 ```kotlin
-val flowView = sdk.getFlowView(activity = this, flowId = "flow_123")
+val flowView = sdk.getFlowView(
+  activity = this,
+  flowId = "flow_123",
+  viewId = R.id.nuxie_flow_slot,
+)
 // Add `flowView` to your container view hierarchy.
 ```
 
-Use `getFlowView(...)` if you want to host inside your own `ComponentActivity`/Fragment/Compose container.
+Use `getFlowView(...)` if you want to host inside your own `ComponentActivity`/Fragment/Compose container. Pass a stable `viewId` for that embedded slot so Android can restore pending flow state after recreation.
 
 ## Delegate Callbacks
 

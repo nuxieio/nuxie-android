@@ -978,6 +978,7 @@ class NuxieSDK private constructor() {
   suspend fun getFlowView(
     activity: ComponentActivity,
     flowId: String,
+    viewId: Int,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     if (!isSetup) throw NuxieError.NotConfigured
@@ -985,6 +986,7 @@ class NuxieSDK private constructor() {
     return svc.getFlowView(
       activity,
       flowId,
+      viewId,
       runtimeDelegate = null,
       colorSchemeMode = colorSchemeMode,
     )

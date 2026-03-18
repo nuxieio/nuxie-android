@@ -75,7 +75,7 @@ val config = NuxieConfiguration(apiKey = "YOUR_API_KEY")
 | `localeIdentifier` | `null` |
 | `isDebugMode` | `false` |
 
-Embedded `FlowView` hosts use `ComponentActivity`. See `getFlowView(...)` in the API reference for the host-side contract.
+Embedded `FlowView` hosts use `ComponentActivity` and provide a stable embedded `viewId`. See `getFlowView(...)` in the API reference for the host-side contract.
 
 `eventLinkingPolicy`:
 

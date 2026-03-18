@@ -285,7 +285,12 @@ class JourneyService(
       runtimeDelegates[journeyId] = it
     }
 
-    val view = flowService.getFlowView(activity, flowId, runtimeDelegate = delegate)
+    val view = flowService.getFlowView(
+      activity = activity,
+      flowId = flowId,
+      viewId = io.nuxie.sdk.R.id.nuxie_flow_view,
+      runtimeDelegate = delegate,
+    )
     delegate.attachFlowView(view)
     presentedJourneyIds += journeyId
     flowRunners[journeyId]?.attach(delegate)
@@ -467,21 +472,17 @@ class JourneyService(
     val journey = inMemoryJourneysById[journeyId] ?: return
     val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
 
-    val event = runCatching {
+    val event = try {
       eventService.prepareTriggerEvent(
         event = eventName,
         properties = properties,
       )
-    }.getOrElse { error ->
+    } catch (error: Throwable) {
       NuxieLogger.warning(
         "JourneyService: Failed to prepare scoped notification event: ${error.message}",
         error,
       )
-      NuxieEvent(
-        name = eventName,
-        distinctId = journey.distinctId,
-        properties = properties,
-      )
+      return
     }
 
     scope.launch {

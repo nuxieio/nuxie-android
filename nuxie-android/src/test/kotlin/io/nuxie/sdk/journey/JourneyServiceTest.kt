@@ -764,6 +764,43 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedNotificationPermissionEvent_honorsBeforeSendDrop() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = SystemEventNames.notificationsEnabled,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+      beforeSend = { event ->
+        if (event.name == SystemEventNames.notificationsEnabled) null else event
+      },
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_drop", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.id, active.first().id)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+      assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun runtimeDismiss_forwardsDismissedCallbackWithReasonAndError() = runBlocking {
     val dismissCalls = mutableListOf<DismissCall>()
     val harness = newHarness(
@@ -896,6 +933,7 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
+    beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
@@ -943,7 +981,9 @@ class JourneyServiceTest {
     )
 
     val api = FakeApi(profile = profile, remoteFlow = remoteFlow, trackDelayMillis = trackDelayMillis)
-    val config = NuxieConfiguration("test_key")
+    val config = NuxieConfiguration("test_key").apply {
+      this.beforeSend = beforeSend
+    }
     val queueStore = InMemoryEventQueueStore()
     val historyStore = InMemoryEventHistoryStore()
     val networkQueue = NuxieNetworkQueue(

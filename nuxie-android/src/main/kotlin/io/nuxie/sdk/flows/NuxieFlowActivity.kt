@@ -48,6 +48,7 @@ class NuxieFlowActivity : ComponentActivity() {
           sdk.getFlowView(
             this@NuxieFlowActivity,
             flowId,
+            viewId = io.nuxie.sdk.R.id.nuxie_flow_view,
             colorSchemeMode = colorSchemeMode,
           )
         }
@@ -60,7 +61,6 @@ class NuxieFlowActivity : ComponentActivity() {
       }
 
       flowView = view
-      view.id = io.nuxie.sdk.R.id.nuxie_flow_view
       view.onDismissRequested = { finish() }
       setContentView(view)
     }

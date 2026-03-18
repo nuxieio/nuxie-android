@@ -66,13 +66,14 @@ class FlowService(
   suspend fun getFlowView(
     activity: ComponentActivity,
     flowId: String,
+    viewId: Int,
     runtimeDelegate: FlowRuntimeDelegate? = null,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
     val flow = fetchFlow(flowId)
     return withContext(Dispatchers.Main.immediate) {
       FlowView(activity).apply {
-        id = FlowViewHostStateRegistry.acquireStableViewId(activity)
+        id = viewId
         this.runtimeDelegate = runtimeDelegate
         this.colorSchemeMode = colorSchemeMode
         load(
@@ -95,7 +96,13 @@ class FlowService(
     runtimeDelegate: FlowRuntimeDelegate? = null,
     colorSchemeMode: FlowColorSchemeMode = FlowColorSchemeMode.LIGHT,
   ): FlowView {
-    return getFlowView(activity, flowId, runtimeDelegate, colorSchemeMode)
+    return getFlowView(
+      activity = activity,
+      flowId = flowId,
+      viewId = io.nuxie.sdk.R.id.nuxie_flow_view,
+      runtimeDelegate = runtimeDelegate,
+      colorSchemeMode = colorSchemeMode,
+    )
   }
 
   suspend fun removeFlows(flowIds: List<String>) {
