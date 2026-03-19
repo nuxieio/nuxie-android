@@ -65,6 +65,7 @@ internal interface NotificationPermissionEventReceiver {
 
 internal interface RuntimePermissionHandler {
   fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean
+  fun hasManifestDeclarations(context: Context, permissions: List<String>): Boolean = true
   fun requestPermissions(
     activity: ComponentActivity,
     permissions: List<String>,
@@ -325,6 +326,33 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
     }
   }
 
+  override fun hasManifestDeclarations(context: Context, permissions: List<String>): Boolean {
+    val declaredPermissions =
+      runCatching {
+        val packageInfo =
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(
+              context.packageName,
+              PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong()),
+            )
+          } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(
+              context.packageName,
+              PackageManager.GET_PERMISSIONS,
+            )
+          }
+        packageInfo.requestedPermissions?.toSet().orEmpty()
+      }.onFailure { error ->
+        NuxieLogger.warning(
+          "FlowView: Failed to inspect host manifest permissions: ${error.message}",
+          error,
+        )
+      }.getOrDefault(emptySet())
+
+    return permissions.all { permission -> declaredPermissions.contains(permission) }
+  }
+
   override fun requestPermissions(
     activity: ComponentActivity,
     permissions: List<String>,
@@ -403,6 +431,8 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
 class FlowView(context: Context) : FrameLayout(context) {
   private companion object {
     const val NULL_PENDING_PERMISSION_JOURNEY_ID = "__NULL_PENDING_PERMISSION_JOURNEY_ID__"
+    const val QUEUED_PROMPT_KIND_NOTIFICATION = "notification"
+    const val QUEUED_PROMPT_KIND_PERMISSION = "permission"
   }
 
   private data class PendingPermissionRequest(
@@ -410,6 +440,22 @@ class FlowView(context: Context) : FrameLayout(context) {
     val permissionType: String,
     val journeyId: String?,
   )
+
+  private sealed class PendingPromptRequest {
+    abstract val requestId: String
+    abstract val journeyId: String?
+
+    data class Notification(
+      override val requestId: String,
+      override val journeyId: String?,
+    ) : PendingPromptRequest()
+
+    data class Permission(
+      override val requestId: String,
+      val permissionType: String,
+      override val journeyId: String?,
+    ) : PendingPromptRequest()
+  }
 
   private enum class State {
     LOADING,
@@ -444,7 +490,7 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var pendingPermissionRequestId: String? = null
   private var pendingPermissionJourneyId: String? = null
   private var pendingPermissionType: String? = null
-  private val queuedPermissionRequests = ArrayDeque<PendingPermissionRequest>()
+  private val queuedPromptRequests = ArrayDeque<PendingPromptRequest>()
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
   internal var runtimePermissionHandler: RuntimePermissionHandler = DefaultRuntimePermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
@@ -513,16 +559,29 @@ class FlowView(context: Context) : FrameLayout(context) {
     state.pendingPermissionRequestId = pendingPermissionRequestId
     state.pendingPermissionJourneyId = pendingPermissionJourneyId
     state.pendingPermissionType = pendingPermissionType
-    state.queuedPermissionRequestIds =
-      ArrayList(queuedPermissionRequests.map { request -> request.requestId })
-    state.queuedPermissionJourneyIds =
+    state.queuedPromptKinds =
       ArrayList(
-        queuedPermissionRequests.map { request ->
+        queuedPromptRequests.map { request ->
+          when (request) {
+            is PendingPromptRequest.Notification -> QUEUED_PROMPT_KIND_NOTIFICATION
+            is PendingPromptRequest.Permission -> QUEUED_PROMPT_KIND_PERMISSION
+          }
+        },
+      )
+    state.queuedPromptRequestIds =
+      ArrayList(queuedPromptRequests.map { request -> request.requestId })
+    state.queuedPromptJourneyIds =
+      ArrayList(
+        queuedPromptRequests.map { request ->
           request.journeyId ?: NULL_PENDING_PERMISSION_JOURNEY_ID
         },
       )
-    state.queuedPermissionTypes =
-      ArrayList(queuedPermissionRequests.map { request -> request.permissionType })
+    state.queuedPromptPermissionTypes =
+      ArrayList(
+        queuedPromptRequests.map { request ->
+          (request as? PendingPromptRequest.Permission)?.permissionType.orEmpty()
+        },
+      )
     return state
   }
 
@@ -538,21 +597,35 @@ class FlowView(context: Context) : FrameLayout(context) {
     pendingPermissionRequestId = state.pendingPermissionRequestId
     pendingPermissionJourneyId = state.pendingPermissionJourneyId
     pendingPermissionType = state.pendingPermissionType
-    queuedPermissionRequests.clear()
-    val queuedRequestIds = state.queuedPermissionRequestIds
-    val queuedJourneyIds = state.queuedPermissionJourneyIds
-    val queuedPermissionTypes = state.queuedPermissionTypes
+    queuedPromptRequests.clear()
+    val queuedRequestKinds = state.queuedPromptKinds
+    val queuedRequestIds = state.queuedPromptRequestIds
+    val queuedJourneyIds = state.queuedPromptJourneyIds
+    val queuedPermissionTypes = state.queuedPromptPermissionTypes
     for (index in queuedRequestIds.indices) {
-      queuedPermissionRequests.addLast(
-        PendingPermissionRequest(
-          requestId = queuedRequestIds[index],
-          permissionType = queuedPermissionTypes.getOrNull(index) ?: continue,
-          journeyId =
-            queuedJourneyIds.getOrNull(index)?.takeUnless { journeyId ->
-              journeyId == NULL_PENDING_PERMISSION_JOURNEY_ID
-            },
-        ),
-      )
+      val journeyId =
+        queuedJourneyIds.getOrNull(index)?.takeUnless { queuedJourneyId ->
+          queuedJourneyId == NULL_PENDING_PERMISSION_JOURNEY_ID
+        }
+      when (queuedRequestKinds.getOrNull(index)) {
+        QUEUED_PROMPT_KIND_NOTIFICATION ->
+          queuedPromptRequests.addLast(
+            PendingPromptRequest.Notification(
+              requestId = queuedRequestIds[index],
+              journeyId = journeyId,
+            ),
+          )
+        QUEUED_PROMPT_KIND_PERMISSION -> {
+          val permissionType = queuedPermissionTypes.getOrNull(index) ?: continue
+          queuedPromptRequests.addLast(
+            PendingPromptRequest.Permission(
+              requestId = queuedRequestIds[index],
+              permissionType = permissionType,
+              journeyId = journeyId,
+            ),
+          )
+        }
+      }
     }
     rebindPendingNotificationPermissionRequestIfNeeded()
     rebindPendingPermissionRequestIfNeeded()
@@ -973,26 +1046,16 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     if (!permissionGranted) {
-      val activity = findComponentActivity(context)
-      if (activity == null) {
-        NuxieLogger.warning(
-          "FlowView: Notification permission prompt requires a ComponentActivity host; emitting denied",
+      val request =
+        PendingPromptRequest.Notification(
+          requestId = UUID.randomUUID().toString(),
+          journeyId = journeyId,
         )
-        emitDenied()
+      if (hasPendingSystemPermissionPrompt()) {
+        queuedPromptRequests.addLast(request)
         return
       }
-      val requestId = pendingNotificationPermissionRequestId ?: UUID.randomUUID().toString()
-      pendingNotificationPermissionRequestId = requestId
-      pendingNotificationPermissionJourneyId = journeyId
-      val launched =
-        notificationPermissionHandler.requestPostNotificationsPermission(
-          activity = activity,
-          requestId = requestId,
-          launchIfNeeded = true,
-          onResult = notificationPermissionResultCallback(journeyId),
-        )
-      if (!launched) {
-        clearPendingNotificationPermissionRequest()
+      if (!startNotificationPermissionRequest(request)) {
         emitDenied()
       }
       return
@@ -1002,12 +1065,47 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   private fun handleRequestPermission(permissionType: String, journeyId: String?) {
-    val request = PendingPermissionRequest(UUID.randomUUID().toString(), permissionType, journeyId)
-    if (pendingPermissionRequestId != null || pendingNotificationPermissionRequestId != null) {
-      queuedPermissionRequests.addLast(request)
+    val request =
+      PendingPromptRequest.Permission(
+        requestId = UUID.randomUUID().toString(),
+        permissionType = permissionType,
+        journeyId = journeyId,
+      )
+    if (hasPendingSystemPermissionPrompt()) {
+      queuedPromptRequests.addLast(request)
       return
     }
-    startPermissionRequest(request)
+    startPermissionRequest(
+      PendingPermissionRequest(
+        requestId = request.requestId,
+        permissionType = request.permissionType,
+        journeyId = request.journeyId,
+      ),
+    )
+  }
+
+  private fun startNotificationPermissionRequest(request: PendingPromptRequest.Notification): Boolean {
+    val activity = findComponentActivity(context)
+    if (activity == null) {
+      NuxieLogger.warning(
+        "FlowView: Notification permission prompt requires a ComponentActivity host; emitting denied",
+      )
+      return false
+    }
+
+    pendingNotificationPermissionRequestId = request.requestId
+    pendingNotificationPermissionJourneyId = request.journeyId
+    val launched =
+      notificationPermissionHandler.requestPostNotificationsPermission(
+        activity = activity,
+        requestId = request.requestId,
+        launchIfNeeded = true,
+        onResult = notificationPermissionResultCallback(request.journeyId),
+      )
+    if (!launched) {
+      clearPendingNotificationPermissionRequest()
+    }
+    return launched
   }
 
   private fun startPermissionRequest(request: PendingPermissionRequest) {
@@ -1039,6 +1137,15 @@ class FlowView(context: Context) : FrameLayout(context) {
 
     if (hasSatisfiedPermissionAccess(request.permissionType, runtimePermissions)) {
       emitGranted()
+      drainNextPermissionRequest()
+      return
+    }
+
+    if (!runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+      NuxieLogger.warning(
+        "FlowView: Host app manifest is missing required declarations for ${runtimePermissions.joinToString()}; emitting denied",
+      )
+      emitDenied()
       drainNextPermissionRequest()
       return
     }
@@ -1228,6 +1335,11 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   private fun rebindPendingNotificationPermissionRequestIfNeeded() {
     val requestId = pendingNotificationPermissionRequestId ?: return
+    if (!NotificationPermissionRequestRegistry.hasPendingWork(requestId)) {
+      clearPendingNotificationPermissionRequest()
+      drainNextPermissionRequest()
+      return
+    }
     val activity = findComponentActivity(context) ?: return
     notificationPermissionHandler.requestPostNotificationsPermission(
       activity = activity,
@@ -1337,10 +1449,24 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   private fun drainNextPermissionRequest() {
-    if (pendingPermissionRequestId != null) return
-    while (pendingPermissionRequestId == null && queuedPermissionRequests.isNotEmpty()) {
-      startPermissionRequest(queuedPermissionRequests.removeFirst())
+    if (hasPendingSystemPermissionPrompt()) return
+    while (!hasPendingSystemPermissionPrompt() && queuedPromptRequests.isNotEmpty()) {
+      when (val request = queuedPromptRequests.removeFirst()) {
+        is PendingPromptRequest.Notification -> startNotificationPermissionRequest(request)
+        is PendingPromptRequest.Permission ->
+          startPermissionRequest(
+            PendingPermissionRequest(
+              requestId = request.requestId,
+              permissionType = request.permissionType,
+              journeyId = request.journeyId,
+            ),
+          )
+      }
     }
+  }
+
+  private fun hasPendingSystemPermissionPrompt(): Boolean {
+    return pendingPermissionRequestId != null || pendingNotificationPermissionRequestId != null
   }
 
   private class SavedState : View.BaseSavedState {
@@ -1349,9 +1475,10 @@ class FlowView(context: Context) : FrameLayout(context) {
     var pendingPermissionRequestId: String? = null
     var pendingPermissionJourneyId: String? = null
     var pendingPermissionType: String? = null
-    var queuedPermissionRequestIds: ArrayList<String> = arrayListOf()
-    var queuedPermissionJourneyIds: ArrayList<String> = arrayListOf()
-    var queuedPermissionTypes: ArrayList<String> = arrayListOf()
+    var queuedPromptKinds: ArrayList<String> = arrayListOf()
+    var queuedPromptRequestIds: ArrayList<String> = arrayListOf()
+    var queuedPromptJourneyIds: ArrayList<String> = arrayListOf()
+    var queuedPromptPermissionTypes: ArrayList<String> = arrayListOf()
 
     constructor(superState: Parcelable?) : super(superState)
 
@@ -1361,11 +1488,13 @@ class FlowView(context: Context) : FrameLayout(context) {
       pendingPermissionRequestId = source.readString()
       pendingPermissionJourneyId = source.readString()
       pendingPermissionType = source.readString()
-      queuedPermissionRequestIds =
+      queuedPromptKinds =
         ArrayList<String>().apply { source.readStringList(this) }
-      queuedPermissionJourneyIds =
+      queuedPromptRequestIds =
         ArrayList<String>().apply { source.readStringList(this) }
-      queuedPermissionTypes =
+      queuedPromptJourneyIds =
+        ArrayList<String>().apply { source.readStringList(this) }
+      queuedPromptPermissionTypes =
         ArrayList<String>().apply { source.readStringList(this) }
     }
 
@@ -1376,9 +1505,10 @@ class FlowView(context: Context) : FrameLayout(context) {
       out.writeString(pendingPermissionRequestId)
       out.writeString(pendingPermissionJourneyId)
       out.writeString(pendingPermissionType)
-      out.writeStringList(queuedPermissionRequestIds)
-      out.writeStringList(queuedPermissionJourneyIds)
-      out.writeStringList(queuedPermissionTypes)
+      out.writeStringList(queuedPromptKinds)
+      out.writeStringList(queuedPromptRequestIds)
+      out.writeStringList(queuedPromptJourneyIds)
+      out.writeStringList(queuedPromptPermissionTypes)
     }
 
     companion object {

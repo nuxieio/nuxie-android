@@ -271,6 +271,36 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestNotifications_waitsForRuntimePermissionPromptToResolve() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val notificationHandler =
+      FakeNotificationPermissionHandler(
+        notificationsEnabled = false,
+        permissionGranted = false,
+        notificationsEnabledAfterRequest = true,
+      )
+    val permissionHandler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      this.notificationPermissionHandler = notificationHandler
+      this.runtimePermissionHandler = permissionHandler
+      this.sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    flowView.performRequestNotifications("journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, permissionHandler.requests.size)
+    assertTrue(notificationHandler.requests.isEmpty())
+
+    val permissionRequest = permissionHandler.requests.single()
+    permissionHandler.resolve(permissionRequest.requestId, granted = false)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, notificationHandler.requests.size)
+  }
+
+  @Test
   fun requestPermission_requestsPhotosPermissionAndEmitsGranted() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeRuntimePermissionHandler(permissionGranted = false)
@@ -369,6 +399,36 @@ class FlowViewNotificationPermissionTest {
       listOf(
         SystemEventNames.permissionDenied to
           mapOf("journey_id" to "journey_1", "type" to "photos"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
+  fun requestPermission_emitsDeniedWhenHostManifestDoesNotDeclarePermission() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler =
+      FakeRuntimePermissionHandler(
+        permissionGranted = false,
+        declaredPermissions = mutableSetOf(),
+      )
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(0, handler.requestInvocations)
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionDenied to
+          mapOf("journey_id" to "journey_1", "type" to "camera"),
       ),
       triggered,
     )
@@ -664,7 +724,6 @@ private class FakeNotificationPermissionHandler(
 
   var requestInvocations: Int = 0
   val requests = mutableListOf<Request>()
-  private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
 
   override fun areNotificationsEnabled(context: Context): Boolean {
     return notificationsEnabled
@@ -682,7 +741,10 @@ private class FakeNotificationPermissionHandler(
   ): Boolean {
     requestInvocations += 1
     requests += Request(requestId = requestId, launchIfNeeded = launchIfNeeded)
-    callbacks[requestId] = onResult
+    if (launchIfNeeded) {
+      NotificationPermissionRequestRegistry.markLaunched(requestId)
+    }
+    NotificationPermissionRequestRegistry.bind(requestId, onResult)
     return true
   }
 
@@ -691,7 +753,7 @@ private class FakeNotificationPermissionHandler(
     if (notificationsEnabledAfterRequest != null) {
       notificationsEnabled = notificationsEnabledAfterRequest
     }
-    callbacks.remove(requestId)?.invoke(granted)
+    NotificationPermissionRequestRegistry.complete(requestId, granted)
   }
 }
 
@@ -713,6 +775,7 @@ private class FakePermissionEventReceiver : FlowRuntimeDelegate, PermissionEvent
 private class FakeRuntimePermissionHandler(
   private var permissionGranted: Boolean,
   private val grantedPermissions: MutableSet<String> = mutableSetOf(),
+  private val declaredPermissions: MutableSet<String>? = null,
 ) : RuntimePermissionHandler {
   data class Request(
     val permissions: List<String>,
@@ -726,6 +789,11 @@ private class FakeRuntimePermissionHandler(
 
   override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
     return permissionGranted || permissions.any { permission -> grantedPermissions.contains(permission) }
+  }
+
+  override fun hasManifestDeclarations(context: Context, permissions: List<String>): Boolean {
+    val requiredPermissions = declaredPermissions ?: return true
+    return permissions.all { permission -> requiredPermissions.contains(permission) }
   }
 
   override fun requestPermissions(
