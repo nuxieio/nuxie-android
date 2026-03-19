@@ -1215,6 +1215,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun resolveRuntimePermissions(permissionType: String): List<String>? {
     return when (permissionType) {
       "camera" -> listOf(Manifest.permission.CAMERA)
+      "location" ->
+        listOf(
+          Manifest.permission.ACCESS_FINE_LOCATION,
+          Manifest.permission.ACCESS_COARSE_LOCATION,
+        )
       "microphone" -> listOf(Manifest.permission.RECORD_AUDIO)
       "photos" ->
         if (sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -1235,6 +1240,16 @@ class FlowView(context: Context) : FrameLayout(context) {
     permissionType: String,
     runtimePermissions: List<String>,
   ): Boolean {
+    if (permissionType == "location") {
+      return runtimePermissionHandler.hasPermissionAccess(
+        context,
+        listOf(
+          Manifest.permission.ACCESS_FINE_LOCATION,
+          Manifest.permission.ACCESS_COARSE_LOCATION,
+        ),
+      )
+    }
+
     if (
       permissionType == "photos" &&
       sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
