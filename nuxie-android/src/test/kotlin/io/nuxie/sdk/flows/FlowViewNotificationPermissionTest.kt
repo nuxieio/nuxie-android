@@ -301,6 +301,41 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_emitsGrantedImmediatelyWhenAlreadyGrantedBehindNotificationPrompt() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val notificationHandler =
+      FakeNotificationPermissionHandler(
+        notificationsEnabled = false,
+        permissionGranted = false,
+      )
+    val permissionHandler = FakeRuntimePermissionHandler(permissionGranted = true)
+    val flowView = FlowView(activity).apply {
+      this.notificationPermissionHandler = notificationHandler
+      this.runtimePermissionHandler = permissionHandler
+      this.sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestNotifications("journey_notifications")
+    flowView.performRequestPermission("camera", "journey_camera")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, notificationHandler.requests.size)
+    assertEquals(0, permissionHandler.requestInvocations)
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionGranted to
+          mapOf("journey_id" to "journey_camera", "type" to "camera"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
   fun requestPermission_requestsPhotosPermissionAndEmitsGranted() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeRuntimePermissionHandler(permissionGranted = false)

@@ -441,6 +441,17 @@ class FlowView(context: Context) : FrameLayout(context) {
     val journeyId: String?,
   )
 
+  private sealed class PermissionRequestResolution {
+    data class Launch(
+      val runtimePermissions: List<String>,
+      val activity: ComponentActivity,
+    ) : PermissionRequestResolution()
+
+    object Granted : PermissionRequestResolution()
+
+    object Denied : PermissionRequestResolution()
+  }
+
   private sealed class PendingPromptRequest {
     abstract val requestId: String
     abstract val journeyId: String?
@@ -1065,23 +1076,28 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   private fun handleRequestPermission(permissionType: String, journeyId: String?) {
-    val request =
+    val queuedRequest =
       PendingPromptRequest.Permission(
         requestId = UUID.randomUUID().toString(),
         permissionType = permissionType,
         journeyId = journeyId,
       )
+    val request =
+      PendingPermissionRequest(
+        requestId = queuedRequest.requestId,
+        permissionType = queuedRequest.permissionType,
+        journeyId = queuedRequest.journeyId,
+      )
+    val resolution = resolvePermissionRequest(request)
     if (hasPendingSystemPermissionPrompt()) {
-      queuedPromptRequests.addLast(request)
+      when (resolution) {
+        PermissionRequestResolution.Granted -> emitPermissionGranted(request)
+        PermissionRequestResolution.Denied -> emitPermissionDenied(request)
+        is PermissionRequestResolution.Launch -> queuedPromptRequests.addLast(queuedRequest)
+      }
       return
     }
-    startPermissionRequest(
-      PendingPermissionRequest(
-        requestId = request.requestId,
-        permissionType = request.permissionType,
-        journeyId = request.journeyId,
-      ),
-    )
+    startPermissionRequest(request, resolution)
   }
 
   private fun startNotificationPermissionRequest(request: PendingPromptRequest.Notification): Boolean {
@@ -1108,56 +1124,22 @@ class FlowView(context: Context) : FrameLayout(context) {
     return launched
   }
 
-  private fun startPermissionRequest(request: PendingPermissionRequest) {
-    val runtimePermissions = resolveRuntimePermissions(request.permissionType)
-    val properties = buildPermissionEventProperties(request.journeyId, request.permissionType)
-    val emitGranted = {
-      emitPermissionEvent(
-        SystemEventNames.permissionGranted,
-        properties,
-        request.journeyId,
-      )
-    }
-    val emitDenied = {
-      emitPermissionEvent(
-        SystemEventNames.permissionDenied,
-        properties,
-        request.journeyId,
-      )
-    }
-
-    if (runtimePermissions == null) {
-      NuxieLogger.warning(
-        "FlowView: Unsupported request permission type '${request.permissionType}'; emitting denied",
-      )
-      emitDenied()
-      drainNextPermissionRequest()
-      return
-    }
-
-    if (hasSatisfiedPermissionAccess(request.permissionType, runtimePermissions)) {
-      emitGranted()
-      drainNextPermissionRequest()
-      return
-    }
-
-    if (!runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
-      NuxieLogger.warning(
-        "FlowView: Host app manifest is missing required declarations for ${runtimePermissions.joinToString()}; emitting denied",
-      )
-      emitDenied()
-      drainNextPermissionRequest()
-      return
-    }
-
-    val activity = findComponentActivity(context)
-    if (activity == null) {
-      NuxieLogger.warning(
-        "FlowView: Runtime permission prompt requires a ComponentActivity host; emitting denied",
-      )
-      emitDenied()
-      drainNextPermissionRequest()
-      return
+  private fun startPermissionRequest(
+    request: PendingPermissionRequest,
+    resolution: PermissionRequestResolution = resolvePermissionRequest(request),
+  ) {
+    when (resolution) {
+      PermissionRequestResolution.Granted -> {
+        emitPermissionGranted(request)
+        drainNextPermissionRequest()
+        return
+      }
+      PermissionRequestResolution.Denied -> {
+        emitPermissionDenied(request)
+        drainNextPermissionRequest()
+        return
+      }
+      is PermissionRequestResolution.Launch -> Unit
     }
 
     pendingPermissionRequestId = request.requestId
@@ -1165,17 +1147,69 @@ class FlowView(context: Context) : FrameLayout(context) {
     pendingPermissionType = request.permissionType
     val launched =
       runtimePermissionHandler.requestPermissions(
-        activity = activity,
-        permissions = runtimePermissions,
+        activity = resolution.activity,
+        permissions = resolution.runtimePermissions,
         requestId = request.requestId,
         launchIfNeeded = true,
         onResult = permissionResultCallback(request),
       )
     if (!launched) {
       clearPendingPermissionRequest(request.requestId)
-      emitDenied()
+      emitPermissionDenied(request)
       drainNextPermissionRequest()
     }
+  }
+
+  private fun resolvePermissionRequest(
+    request: PendingPermissionRequest,
+  ): PermissionRequestResolution {
+    val runtimePermissions = resolveRuntimePermissions(request.permissionType)
+    if (runtimePermissions == null) {
+      NuxieLogger.warning(
+        "FlowView: Unsupported request permission type '${request.permissionType}'; emitting denied",
+      )
+      return PermissionRequestResolution.Denied
+    }
+
+    if (hasSatisfiedPermissionAccess(request.permissionType, runtimePermissions)) {
+      return PermissionRequestResolution.Granted
+    }
+
+    if (!runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+      NuxieLogger.warning(
+        "FlowView: Host app manifest is missing required declarations for ${runtimePermissions.joinToString()}; emitting denied",
+      )
+      return PermissionRequestResolution.Denied
+    }
+
+    val activity = findComponentActivity(context)
+    if (activity == null) {
+      NuxieLogger.warning(
+        "FlowView: Runtime permission prompt requires a ComponentActivity host; emitting denied",
+      )
+      return PermissionRequestResolution.Denied
+    }
+
+    return PermissionRequestResolution.Launch(
+      runtimePermissions = runtimePermissions,
+      activity = activity,
+    )
+  }
+
+  private fun emitPermissionGranted(request: PendingPermissionRequest) {
+    emitPermissionEvent(
+      SystemEventNames.permissionGranted,
+      buildPermissionEventProperties(request.journeyId, request.permissionType),
+      request.journeyId,
+    )
+  }
+
+  private fun emitPermissionDenied(request: PendingPermissionRequest) {
+    emitPermissionEvent(
+      SystemEventNames.permissionDenied,
+      buildPermissionEventProperties(request.journeyId, request.permissionType),
+      request.journeyId,
+    )
   }
 
   private fun resolveRuntimePermissions(permissionType: String): List<String>? {
