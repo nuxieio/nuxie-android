@@ -33,6 +33,8 @@ import io.nuxie.sdk.flows.ViewModelInstance
 import io.nuxie.sdk.flows.ViewModelProperty
 import io.nuxie.sdk.flows.ViewModelPropertyType
 import io.nuxie.sdk.identity.DefaultIdentityService
+import io.nuxie.sdk.ir.IREnvelope
+import io.nuxie.sdk.ir.IRExpr
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.ActiveJourney
@@ -194,6 +196,60 @@ class JourneyServiceTest {
 
       assertEquals(5_000L, started.journey.conversionAnchorAtEpochMillis)
       assertEquals(5_000L, started.journey.updatedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun explicitGoalAction_latchesConversionAndExitsImmediately() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Goal(goalId = "primary")),
+          enabled = true,
+        )
+      )
+    )
+    val explicitGoal = GoalConfig(
+      kind = GoalConfig.Kind.EVENT,
+      eventName = JourneyEvents.journeyGoalHit,
+      eventFilter = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.PredAnd(
+          listOf(
+            IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+            IRExpr.Pred("eq", "goal_id", IRExpr.String("primary")),
+          )
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = explicitGoal,
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(50)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertTrue(active.isEmpty())
     } finally {
       harness.close()
     }
@@ -989,11 +1045,14 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
+<<<<<<< HEAD
     beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
+=======
+>>>>>>> f219980 (fix: address explicit goal action review feedback)
     onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
     onPurchaseRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, productId: String, placementIndex: Any?) -> Unit = { _, _, _, _, _ -> },
     onRestoreRequested: suspend (journeyId: String, campaignId: String?, screenId: String?) -> Unit = { _, _, _ -> },

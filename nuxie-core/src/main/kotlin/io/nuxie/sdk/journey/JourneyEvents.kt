@@ -18,6 +18,7 @@ object JourneyEvents {
   const val journeyPaused: String = "\$journey_paused"
   const val journeyResumed: String = "\$journey_resumed"
   const val journeyErrored: String = "\$journey_errored"
+  const val journeyGoalHit: String = "\$journey_goal_hit"
   const val journeyGoalMet: String = "\$journey_goal_met"
   const val journeyExited: String = "\$journey_exited"
   const val journeyAction: String = "\$journey_action"
@@ -157,6 +158,30 @@ object JourneyEvents {
     }
     if (!error.isNullOrBlank()) {
       props["error_message"] = error
+    }
+    return props
+  }
+
+  fun journeyGoalHitProperties(
+    journey: Journey,
+    screenId: String?,
+    interactionId: String?,
+    goalId: String,
+    goalLabel: String?,
+  ): Map<String, Any?> {
+    val props = mutableMapOf<String, Any?>(
+      "journey_id" to journey.id,
+      "campaign_id" to journey.campaignId,
+      "goal_id" to goalId,
+    )
+    if (!screenId.isNullOrBlank()) {
+      props["screen_id"] = screenId
+    }
+    if (!interactionId.isNullOrBlank()) {
+      props["interaction_id"] = interactionId
+    }
+    if (!goalLabel.isNullOrBlank()) {
+      props["goal_label"] = goalLabel
     }
     return props
   }

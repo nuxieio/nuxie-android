@@ -72,6 +72,10 @@ sealed class FlowRunOutcome {
   data class Exited(val reason: JourneyExitReason) : FlowRunOutcome()
 }
 
+data class GoalActionResolution(
+  val shouldExit: Boolean = false,
+)
+
 interface FlowJourneyHost {
   suspend fun sendRuntimeMessage(type: String, payload: JsonObject = JsonObject(emptyMap()), replyTo: String? = null)
   suspend fun showScreen(screenId: String, transition: JsonElement? = null)
@@ -98,6 +102,8 @@ class FlowJourneyRunner(
   private val irRuntime: IRRuntime,
   private val scope: CoroutineScope,
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+  private val onGoalActionHit: suspend (goalId: String, goalLabel: String?) -> GoalActionResolution =
+    { _, _ -> GoalActionResolution() },
 ) {
   private sealed class ActionResult {
     data object Continue : ActionResult()
@@ -484,6 +490,11 @@ class FlowJourneyRunner(
           handleSendEvent(action, context)
           trackAction(action, context, error = null)
           ActionResult.Continue
+        }
+        is InteractionAction.Goal -> {
+          val result = handleGoal(action, context)
+          trackAction(action, context, error = null)
+          result
         }
         is InteractionAction.UpdateCustomer -> {
           handleUpdateCustomer(action, context)
@@ -1314,6 +1325,29 @@ class FlowJourneyRunner(
     )
   }
 
+  private suspend fun handleGoal(
+    action: InteractionAction.Goal,
+    context: RuntimeTriggerContext,
+  ): ActionResult {
+    val goalId = action.goalId.ifBlank { "primary" }
+    eventService.track(
+      JourneyEvents.journeyGoalHit,
+      properties = JourneyEvents.journeyGoalHitProperties(
+        journey = journey,
+        screenId = context.screenId ?: journey.flowState.currentScreenId,
+        interactionId = context.interactionId,
+        goalId = goalId,
+        goalLabel = action.label,
+      )
+    )
+    val resolution = onGoalActionHit(goalId, action.label)
+    return if (resolution.shouldExit) {
+      ActionResult.Exit(JourneyExitReason.GOAL_MET)
+    } else {
+      ActionResult.Continue
+    }
+  }
+
   private fun sendViewModelInit() {
     warnConvertersIfNeeded()
     val payload = buildJsonObject(
@@ -1640,6 +1674,7 @@ private val InteractionAction.actionType: String
     is InteractionAction.Condition -> "condition"
     is InteractionAction.Experiment -> "experiment"
     is InteractionAction.SendEvent -> "send_event"
+    is InteractionAction.Goal -> "goal"
     is InteractionAction.UpdateCustomer -> "update_customer"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"

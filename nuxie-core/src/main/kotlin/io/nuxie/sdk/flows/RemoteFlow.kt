@@ -319,6 +319,12 @@ sealed interface InteractionAction {
   ) : InteractionAction
 
   @Serializable
+  data class Goal(
+    val goalId: String = "primary",
+    val label: String? = null,
+  ) : InteractionAction
+
+  @Serializable
   data class UpdateCustomer(
     val attributes: Map<String, JsonElement>,
   ) : InteractionAction
@@ -443,6 +449,14 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       "condition" -> input.json.decodeFromJsonElement(InteractionAction.Condition.serializer(), el)
       "experiment" -> input.json.decodeFromJsonElement(InteractionAction.Experiment.serializer(), el)
       "send_event" -> input.json.decodeFromJsonElement(InteractionAction.SendEvent.serializer(), el)
+      "goal" -> {
+        val goalId =
+          (obj["goalId"] as? JsonPrimitive)?.contentOrNull
+            ?: (obj["id"] as? JsonPrimitive)?.contentOrNull
+            ?: "primary"
+        val label = (obj["label"] as? JsonPrimitive)?.contentOrNull
+        InteractionAction.Goal(goalId = goalId, label = label)
+      }
       "update_customer" -> input.json.decodeFromJsonElement(InteractionAction.UpdateCustomer.serializer(), el)
       "purchase" -> input.json.decodeFromJsonElement(InteractionAction.Purchase.serializer(), el)
       "restore" -> InteractionAction.Restore
@@ -526,6 +540,10 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
         if (value.properties != null) {
           put("properties", output.json.encodeToJsonElement(MapSerializer(String.serializer(), JsonElement.serializer()), value.properties))
         }
+      }
+      is InteractionAction.Goal -> encodeWithType("goal") {
+        put("goalId", value.goalId)
+        if (value.label != null) put("label", value.label)
       }
       is InteractionAction.UpdateCustomer -> encodeWithType("update_customer") {
         put("attributes", output.json.encodeToJsonElement(MapSerializer(String.serializer(), JsonElement.serializer()), value.attributes))
