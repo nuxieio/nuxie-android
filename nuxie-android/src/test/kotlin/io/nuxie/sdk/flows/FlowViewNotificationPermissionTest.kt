@@ -284,6 +284,32 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_reRequestsPhotosWhenOnlySelectedPhotosAccessExists() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler =
+      FakeRuntimePermissionHandler(
+        permissionGranted = false,
+        grantedPermissions =
+          mutableSetOf(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED),
+      )
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.UPSIDE_DOWN_CAKE }
+    }
+
+    flowView.performRequestPermission("photos", "journey_1")
+
+    assertEquals(1, handler.requestInvocations)
+    assertEquals(
+      listOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+      ),
+      handler.requests.single().permissions,
+    )
+  }
+
+  @Test
   fun requestPermission_standaloneFlowRoutesResultToRuntimeOnly() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeRuntimePermissionHandler(permissionGranted = true)
@@ -421,6 +447,42 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_restoresQueuedPromptsAfterHierarchyStateRestore() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val stableViewId = R.id.nuxie_flow_view
+    val flowView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    flowView.performRequestPermission("microphone", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val savedState = SparseArray<Parcelable>()
+    flowView.saveHierarchyState(savedState)
+
+    val restoredView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+    }
+    restoredView.restoreHierarchyState(savedState)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val activeRequest = handler.requests.first()
+    handler.resolve(activeRequest.requestId, granted = false)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(3, handler.requests.size)
+    val reboundRequest = handler.requests[1]
+    val queuedRequest = handler.requests[2]
+    assertEquals(activeRequest.requestId, reboundRequest.requestId)
+    assertEquals(true, queuedRequest.launchIfNeeded)
+    assertEquals(listOf(Manifest.permission.RECORD_AUDIO), queuedRequest.permissions)
+  }
+
+  @Test
   fun notificationPermissionRequestRegistry_deliversPendingResultToReboundCallback() {
     val requestId = "req_1"
     var reboundGranted: Boolean? = null
@@ -551,6 +613,7 @@ private class FakePermissionEventReceiver : FlowRuntimeDelegate, PermissionEvent
 
 private class FakeRuntimePermissionHandler(
   private var permissionGranted: Boolean,
+  private val grantedPermissions: MutableSet<String> = mutableSetOf(),
 ) : RuntimePermissionHandler {
   data class Request(
     val permissions: List<String>,
@@ -563,7 +626,7 @@ private class FakeRuntimePermissionHandler(
   private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
 
   override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
-    return permissionGranted
+    return permissionGranted || permissions.any { permission -> grantedPermissions.contains(permission) }
   }
 
   override fun requestPermissions(

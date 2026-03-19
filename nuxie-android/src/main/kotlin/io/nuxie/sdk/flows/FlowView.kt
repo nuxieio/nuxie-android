@@ -401,6 +401,10 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
 }
 
 class FlowView(context: Context) : FrameLayout(context) {
+  private companion object {
+    const val NULL_PENDING_PERMISSION_JOURNEY_ID = "__NULL_PENDING_PERMISSION_JOURNEY_ID__"
+  }
+
   private data class PendingPermissionRequest(
     val requestId: String,
     val permissionType: String,
@@ -509,6 +513,16 @@ class FlowView(context: Context) : FrameLayout(context) {
     state.pendingPermissionRequestId = pendingPermissionRequestId
     state.pendingPermissionJourneyId = pendingPermissionJourneyId
     state.pendingPermissionType = pendingPermissionType
+    state.queuedPermissionRequestIds =
+      ArrayList(queuedPermissionRequests.map { request -> request.requestId })
+    state.queuedPermissionJourneyIds =
+      ArrayList(
+        queuedPermissionRequests.map { request ->
+          request.journeyId ?: NULL_PENDING_PERMISSION_JOURNEY_ID
+        },
+      )
+    state.queuedPermissionTypes =
+      ArrayList(queuedPermissionRequests.map { request -> request.permissionType })
     return state
   }
 
@@ -524,6 +538,22 @@ class FlowView(context: Context) : FrameLayout(context) {
     pendingPermissionRequestId = state.pendingPermissionRequestId
     pendingPermissionJourneyId = state.pendingPermissionJourneyId
     pendingPermissionType = state.pendingPermissionType
+    queuedPermissionRequests.clear()
+    val queuedRequestIds = state.queuedPermissionRequestIds
+    val queuedJourneyIds = state.queuedPermissionJourneyIds
+    val queuedPermissionTypes = state.queuedPermissionTypes
+    for (index in queuedRequestIds.indices) {
+      queuedPermissionRequests.addLast(
+        PendingPermissionRequest(
+          requestId = queuedRequestIds[index],
+          permissionType = queuedPermissionTypes.getOrNull(index) ?: continue,
+          journeyId =
+            queuedJourneyIds.getOrNull(index)?.takeUnless { journeyId ->
+              journeyId == NULL_PENDING_PERMISSION_JOURNEY_ID
+            },
+        ),
+      )
+    }
     rebindPendingNotificationPermissionRequestIfNeeded()
     rebindPendingPermissionRequestIfNeeded()
   }
@@ -1007,7 +1037,7 @@ class FlowView(context: Context) : FrameLayout(context) {
       return
     }
 
-    if (runtimePermissionHandler.hasPermissionAccess(context, runtimePermissions)) {
+    if (hasSatisfiedPermissionAccess(request.permissionType, runtimePermissions)) {
       emitGranted()
       drainNextPermissionRequest()
       return
@@ -1058,6 +1088,23 @@ class FlowView(context: Context) : FrameLayout(context) {
         }
       else -> null
     }
+  }
+
+  private fun hasSatisfiedPermissionAccess(
+    permissionType: String,
+    runtimePermissions: List<String>,
+  ): Boolean {
+    if (
+      permissionType == "photos" &&
+      sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+    ) {
+      return runtimePermissionHandler.hasPermissionAccess(
+        context,
+        listOf(Manifest.permission.READ_MEDIA_IMAGES),
+      )
+    }
+
+    return runtimePermissionHandler.hasPermissionAccess(context, runtimePermissions)
   }
 
   private fun buildNotificationEventProperties(journeyId: String?): Map<String, Any?>? {
@@ -1288,6 +1335,9 @@ class FlowView(context: Context) : FrameLayout(context) {
     var pendingPermissionRequestId: String? = null
     var pendingPermissionJourneyId: String? = null
     var pendingPermissionType: String? = null
+    var queuedPermissionRequestIds: ArrayList<String> = arrayListOf()
+    var queuedPermissionJourneyIds: ArrayList<String> = arrayListOf()
+    var queuedPermissionTypes: ArrayList<String> = arrayListOf()
 
     constructor(superState: Parcelable?) : super(superState)
 
@@ -1297,6 +1347,12 @@ class FlowView(context: Context) : FrameLayout(context) {
       pendingPermissionRequestId = source.readString()
       pendingPermissionJourneyId = source.readString()
       pendingPermissionType = source.readString()
+      queuedPermissionRequestIds =
+        ArrayList<String>().apply { source.readStringList(this) }
+      queuedPermissionJourneyIds =
+        ArrayList<String>().apply { source.readStringList(this) }
+      queuedPermissionTypes =
+        ArrayList<String>().apply { source.readStringList(this) }
     }
 
     override fun writeToParcel(out: Parcel, flags: Int) {
@@ -1306,6 +1362,9 @@ class FlowView(context: Context) : FrameLayout(context) {
       out.writeString(pendingPermissionRequestId)
       out.writeString(pendingPermissionJourneyId)
       out.writeString(pendingPermissionType)
+      out.writeStringList(queuedPermissionRequestIds)
+      out.writeStringList(queuedPermissionJourneyIds)
+      out.writeStringList(queuedPermissionTypes)
     }
 
     companion object {
