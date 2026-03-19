@@ -162,6 +162,7 @@ class FlowJourneyRunnerTest {
     val purchases: MutableList<Pair<String, Any?>> = mutableListOf()
     var restores: Int = 0
     val requestNotificationJourneyIds: MutableList<String?> = mutableListOf()
+    val requestPermissionRequests: MutableList<Pair<String, String?>> = mutableListOf()
     val links: MutableList<Pair<String, String?>> = mutableListOf()
     var dismissed: Int = 0
     val backs: MutableList<Pair<Int?, JsonElement?>> = mutableListOf()
@@ -185,6 +186,10 @@ class FlowJourneyRunnerTest {
 
     override suspend fun performRequestNotifications(journeyId: String?) {
       requestNotificationJourneyIds += journeyId
+    }
+
+    override suspend fun performRequestPermission(permissionType: String, journeyId: String?) {
+      requestPermissionRequests += permissionType to journeyId
     }
 
     override suspend fun performOpenLink(url: String, target: String?) {
@@ -420,6 +425,42 @@ class FlowJourneyRunnerTest {
       settle()
 
       assertEquals(listOf(harness.journey.id), harness.host.requestNotificationJourneyIds)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun requestPermissionActionContinuesAndForwardsJourneyContext() = runBlocking {
+    val interactions = mapOf(
+      "screen_1" to listOf(
+        Interaction(
+          id = "tap_permission",
+          trigger = InteractionTrigger.Press,
+          actions = listOf(
+            InteractionAction.RequestPermission(permissionType = "camera"),
+          ),
+          enabled = true,
+        ),
+      ),
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      harness.journey.flowState.currentScreenId = "screen_1"
+      val outcome = harness.runner.dispatchTrigger(
+        trigger = InteractionTrigger.Press,
+        screenId = "screen_1",
+        componentId = null,
+        instanceId = null,
+        event = null,
+      )
+      assertNull(outcome)
+      settle()
+
+      assertEquals(
+        listOf("camera" to harness.journey.id),
+        harness.host.requestPermissionRequests,
+      )
     } finally {
       harness.close()
     }

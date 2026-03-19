@@ -76,6 +76,13 @@ class RemoteFlowDecodeTest {
               "actions": [
                 { "type": "request_notifications" }
               ]
+            },
+            {
+              "id": "i5",
+              "trigger": { "type": "press" },
+              "actions": [
+                { "type": "request_permission", "permissionType": "camera" }
+              ]
             }
           ]
         },
@@ -108,7 +115,7 @@ class RemoteFlowDecodeTest {
 
     val interactions = flow.interactions["screen_1"]
     assertNotNull(interactions)
-    assertEquals(4, interactions!!.size)
+    assertEquals(5, interactions!!.size)
 
     val globalInteractions = flow.interactions["__global__"]
     assertNotNull(globalInteractions)
@@ -142,5 +149,9 @@ class RemoteFlowDecodeTest {
 
     val notifications = interactions[3]
     assertTrue(notifications.actions[0] is InteractionAction.RequestNotifications)
+
+    val permission = interactions[4]
+    val requestPermission = permission.actions[0] as InteractionAction.RequestPermission
+    assertEquals("camera", requestPermission.permissionType)
   }
 }

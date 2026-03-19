@@ -723,6 +723,62 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedPermissionEvent_onlyAdvancesTheRequestingJourney() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = SystemEventNames.permissionGranted,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_permission_scope_1", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+      val resumedJourneyId = "journey_permission_scope_2"
+      harness.service.resumeFromServerState(
+        journeys = listOf(
+          ActiveJourney(
+            sessionId = resumedJourneyId,
+            campaignId = "camp_1",
+            currentNodeId = "screen_1",
+            context = JsonObject(emptyMap()),
+          )
+        ),
+        campaigns = harness.campaigns,
+      )
+      delay(80)
+
+      harness.service.handleScopedPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.permissionGranted,
+        properties = mapOf("journey_id" to started.id, "type" to "camera"),
+      )
+      delay(80)
+
+      val historyAfterScopedEvent = harness.eventService.getEventsForUser("user_1", limit = 100)
+      assertTrue(historyAfterScopedEvent.none { it.name == SystemEventNames.permissionGranted })
+
+      harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_permission_scope_noop", name = "noop", distinctId = "user_1")
+      )
+      delay(80)
+
+      val activeById = harness.service.getActiveJourneys("user_1").associateBy { it.id }
+      assertEquals(2, activeById.size)
+      assertNotNull(activeById[started.id])
+      assertNotNull(activeById[resumedJourneyId])
+      assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
+      assertTrue(activeById[resumedJourneyId]?.convertedAtEpochMillis == null)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,

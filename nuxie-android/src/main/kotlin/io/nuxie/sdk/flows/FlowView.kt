@@ -63,7 +63,90 @@ internal interface NotificationPermissionEventReceiver {
   )
 }
 
+internal interface RuntimePermissionHandler {
+  fun isPermissionGranted(context: Context, permission: String): Boolean
+  fun requestPermission(
+    activity: ComponentActivity,
+    permission: String,
+    requestId: String,
+    launchIfNeeded: Boolean,
+    onResult: (Boolean) -> Unit,
+  ): Boolean
+}
+
+internal interface PermissionEventReceiver {
+  fun onPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>,
+  )
+}
+
 internal object NotificationPermissionRequestRegistry {
+  private val callbacks: MutableMap<String, (Boolean) -> Unit> = mutableMapOf()
+  private val pendingResults: MutableMap<String, Boolean> = mutableMapOf()
+  private val inFlightRequestIds: MutableSet<String> = mutableSetOf()
+  private val lock = Any()
+
+  fun bind(requestId: String, onResult: (Boolean) -> Unit) {
+    val pendingResult =
+      synchronized(lock) {
+        callbacks[requestId] = onResult
+        pendingResults.remove(requestId)
+      }
+
+    if (pendingResult != null) {
+      synchronized(lock) {
+        callbacks.remove(requestId)
+      }
+      onResult(pendingResult)
+    }
+  }
+
+  fun markLaunched(requestId: String): Boolean {
+    synchronized(lock) {
+      if (inFlightRequestIds.contains(requestId)) return false
+      inFlightRequestIds += requestId
+      return true
+    }
+  }
+
+  fun complete(requestId: String, granted: Boolean) {
+    val callback =
+      synchronized(lock) {
+        inFlightRequestIds.remove(requestId)
+        callbacks.remove(requestId).also { existing ->
+          if (existing == null) {
+            pendingResults[requestId] = granted
+          }
+        }
+      }
+    callback?.invoke(granted)
+  }
+
+  fun hasPendingWork(requestId: String): Boolean {
+    synchronized(lock) {
+      return inFlightRequestIds.contains(requestId) || pendingResults.containsKey(requestId)
+    }
+  }
+
+  fun clear(requestId: String) {
+    synchronized(lock) {
+      callbacks.remove(requestId)
+      pendingResults.remove(requestId)
+      inFlightRequestIds.remove(requestId)
+    }
+  }
+
+  internal fun resetForTest() {
+    synchronized(lock) {
+      callbacks.clear()
+      pendingResults.clear()
+      inFlightRequestIds.clear()
+    }
+  }
+}
+
+internal object RuntimePermissionRequestRegistry {
   private val callbacks: MutableMap<String, (Boolean) -> Unit> = mutableMapOf()
   private val pendingResults: MutableMap<String, Boolean> = mutableMapOf()
   private val inFlightRequestIds: MutableSet<String> = mutableSetOf()
@@ -228,6 +311,89 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
   }
 }
 
+internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
+  private val activityResultLaunchers:
+    MutableMap<ComponentActivity, MutableMap<String, ActivityResultLauncher<String>>> = WeakHashMap()
+
+  override fun isPermissionGranted(context: Context, permission: String): Boolean {
+    return ContextCompat.checkSelfPermission(
+      context,
+      permission,
+    ) == PackageManager.PERMISSION_GRANTED
+  }
+
+  override fun requestPermission(
+    activity: ComponentActivity,
+    permission: String,
+    requestId: String,
+    launchIfNeeded: Boolean,
+    onResult: (Boolean) -> Unit,
+  ): Boolean {
+    val shouldLaunch =
+      if (launchIfNeeded) {
+        RuntimePermissionRequestRegistry.markLaunched(requestId)
+      } else {
+        false
+      }
+    RuntimePermissionRequestRegistry.bind(requestId, onResult)
+
+    return runCatching {
+      val launcher = permissionLauncher(activity, requestId)
+      if (shouldLaunch) {
+        launcher.launch(permission)
+      }
+    }.onFailure {
+      RuntimePermissionRequestRegistry.clear(requestId)
+      NuxieLogger.warning("FlowView: Failed to request runtime permission: ${it.message}", it)
+    }.isSuccess
+  }
+
+  private fun permissionLauncher(
+    activity: ComponentActivity,
+    requestId: String,
+  ): ActivityResultLauncher<String> {
+    synchronized(activityResultLaunchers) {
+      val launchersForActivity = activityResultLaunchers.getOrPut(activity) { mutableMapOf() }
+      launchersForActivity[requestId]?.let { return it }
+
+      val launcher =
+        activity.activityResultRegistry.register(
+          permissionActivityResultKey(requestId),
+          ActivityResultContracts.RequestPermission(),
+        ) { granted ->
+          RuntimePermissionRequestRegistry.complete(requestId, granted)
+          unregisterPermissionLauncher(activity, requestId)
+        }
+
+      launchersForActivity[requestId] = launcher
+      if (!RuntimePermissionRequestRegistry.hasPendingWork(requestId)) {
+        unregisterPermissionLauncher(activity, requestId)
+      }
+      return launcher
+    }
+  }
+
+  private fun unregisterPermissionLauncher(
+    activity: ComponentActivity,
+    requestId: String,
+  ) {
+    synchronized(activityResultLaunchers) {
+      val launchersForActivity = activityResultLaunchers[activity] ?: return
+      val launcher = launchersForActivity.remove(requestId) ?: return
+      launcher.unregister()
+      if (launchersForActivity.isEmpty()) {
+        activityResultLaunchers.remove(activity)
+      }
+    }
+  }
+
+  companion object {
+    internal fun permissionActivityResultKey(requestId: String): String {
+      return "io.nuxie.sdk.permissions.request.$requestId"
+    }
+  }
+}
+
 class FlowView(context: Context) : FrameLayout(context) {
 
   private enum class State {
@@ -260,7 +426,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var bundleStore: FlowBundleStore? = null
   private var pendingNotificationPermissionRequestId: String? = null
   private var pendingNotificationPermissionJourneyId: String? = null
+  private var pendingPermissionRequestId: String? = null
+  private var pendingPermissionJourneyId: String? = null
+  private var pendingPermissionType: String? = null
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
+  internal var runtimePermissionHandler: RuntimePermissionHandler = DefaultRuntimePermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
   internal var notificationPermissionRuntimeEventSink:
     (eventName: String, properties: Map<String, Any?>?) -> Unit =
@@ -274,6 +444,23 @@ class FlowView(context: Context) : FrameLayout(context) {
     (eventName: String, properties: Map<String, Any?>?, journeyId: String?) -> Unit =
     { eventName, properties, journeyId ->
       dispatchNotificationPermissionEvent(
+        eventName = eventName,
+        properties = properties,
+        journeyId = journeyId,
+      )
+    }
+  internal var permissionRuntimeEventSink:
+    (eventName: String, properties: Map<String, Any?>?) -> Unit =
+    { eventName, properties ->
+      sendPermissionEventToRuntime(
+        eventName = eventName,
+        properties = properties,
+      )
+    }
+  internal var permissionEventSink:
+    (eventName: String, properties: Map<String, Any?>?, journeyId: String?) -> Unit =
+    { eventName, properties, journeyId ->
+      dispatchPermissionEvent(
         eventName = eventName,
         properties = properties,
         journeyId = journeyId,
@@ -300,12 +487,16 @@ class FlowView(context: Context) : FrameLayout(context) {
     super.onAttachedToWindow()
     requestApplyInsets()
     rebindPendingNotificationPermissionRequestIfNeeded()
+    rebindPendingPermissionRequestIfNeeded()
   }
 
   override fun onSaveInstanceState(): Parcelable? {
     val state = SavedState(super.onSaveInstanceState())
     state.pendingNotificationPermissionRequestId = pendingNotificationPermissionRequestId
     state.pendingNotificationPermissionJourneyId = pendingNotificationPermissionJourneyId
+    state.pendingPermissionRequestId = pendingPermissionRequestId
+    state.pendingPermissionJourneyId = pendingPermissionJourneyId
+    state.pendingPermissionType = pendingPermissionType
     return state
   }
 
@@ -318,7 +509,11 @@ class FlowView(context: Context) : FrameLayout(context) {
     super.onRestoreInstanceState(state.superState)
     pendingNotificationPermissionRequestId = state.pendingNotificationPermissionRequestId
     pendingNotificationPermissionJourneyId = state.pendingNotificationPermissionJourneyId
+    pendingPermissionRequestId = state.pendingPermissionRequestId
+    pendingPermissionJourneyId = state.pendingPermissionJourneyId
+    pendingPermissionType = state.pendingPermissionType
     rebindPendingNotificationPermissionRequestIfNeeded()
+    rebindPendingPermissionRequestIfNeeded()
   }
 
   override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
@@ -405,6 +600,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     startLoadTimeout()
     webView.loadUrl(entryUrl)
     rebindPendingNotificationPermissionRequestIfNeeded()
+    rebindPendingPermissionRequestIfNeeded()
   }
 
   fun sendRuntimeMessage(type: String, payload: JsonObject = JsonObject(emptyMap()), replyTo: String? = null) {
@@ -421,6 +617,15 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   fun performRequestNotifications(journeyId: String? = null) {
     val action = { handleRequestNotifications(journeyId) }
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      action()
+    } else {
+      post { action() }
+    }
+  }
+
+  fun performRequestPermission(permissionType: String, journeyId: String? = null) {
+    val action = { handleRequestPermission(permissionType, journeyId) }
     if (Looper.myLooper() == Looper.getMainLooper()) {
       action()
     } else {
@@ -480,6 +685,15 @@ class FlowView(context: Context) : FrameLayout(context) {
           runtimeDelegate?.onRuntimeMessage(type, payload, id)
         } else {
           performRequestNotifications()
+        }
+      }
+
+      "action/request_permission" -> {
+        if (runtimeDelegate != null) {
+          runtimeDelegate?.onRuntimeMessage(type, payload, id)
+        } else {
+          val permissionType = (payload["permissionType"] as? JsonPrimitive)?.contentOrNull ?: return
+          performRequestPermission(permissionType)
         }
       }
 
@@ -745,11 +959,95 @@ class FlowView(context: Context) : FrameLayout(context) {
     emitDenied()
   }
 
+  private fun handleRequestPermission(permissionType: String, journeyId: String?) {
+    val runtimePermission = resolveRuntimePermission(permissionType)
+    val properties = buildPermissionEventProperties(journeyId, permissionType)
+    val emitGranted = {
+      emitPermissionEvent(
+        SystemEventNames.permissionGranted,
+        properties,
+        journeyId,
+      )
+    }
+    val emitDenied = {
+      emitPermissionEvent(
+        SystemEventNames.permissionDenied,
+        properties,
+        journeyId,
+      )
+    }
+
+    if (runtimePermission == null) {
+      NuxieLogger.warning(
+        "FlowView: Unsupported request permission type '$permissionType'; emitting denied",
+      )
+      emitDenied()
+      return
+    }
+
+    if (runtimePermissionHandler.isPermissionGranted(context, runtimePermission)) {
+      emitGranted()
+      return
+    }
+
+    val activity = findComponentActivity(context)
+    if (activity == null) {
+      NuxieLogger.warning(
+        "FlowView: Runtime permission prompt requires a ComponentActivity host; emitting denied",
+      )
+      emitDenied()
+      return
+    }
+
+    val requestId = pendingPermissionRequestId ?: UUID.randomUUID().toString()
+    pendingPermissionRequestId = requestId
+    pendingPermissionJourneyId = journeyId
+    pendingPermissionType = permissionType
+    val launched =
+      runtimePermissionHandler.requestPermission(
+        activity = activity,
+        permission = runtimePermission,
+        requestId = requestId,
+        launchIfNeeded = true,
+        onResult = permissionResultCallback(permissionType, journeyId),
+      )
+    if (!launched) {
+      clearPendingPermissionRequest()
+      emitDenied()
+    }
+  }
+
+  private fun resolveRuntimePermission(permissionType: String): String? {
+    return when (permissionType) {
+      "camera" -> Manifest.permission.CAMERA
+      "microphone" -> Manifest.permission.RECORD_AUDIO
+      "photos" ->
+        if (sdkIntProvider() >= Build.VERSION_CODES.TIRAMISU) {
+          Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+          Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+      else -> null
+    }
+  }
+
   private fun buildNotificationEventProperties(journeyId: String?): Map<String, Any?>? {
     return if (journeyId.isNullOrBlank()) {
       null
     } else {
       mapOf("journey_id" to journeyId)
+    }
+  }
+
+  private fun buildPermissionEventProperties(
+    journeyId: String?,
+    permissionType: String,
+  ): Map<String, Any?> {
+    return buildMap {
+      if (!journeyId.isNullOrBlank()) {
+        put("journey_id", journeyId)
+      }
+      put("type", permissionType)
     }
   }
 
@@ -759,6 +1057,14 @@ class FlowView(context: Context) : FrameLayout(context) {
     journeyId: String?,
   ) {
     notificationPermissionEventSink(eventName, properties, journeyId)
+  }
+
+  private fun emitPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>?,
+    journeyId: String?,
+  ) {
+    permissionEventSink(eventName, properties, journeyId)
   }
 
   private fun dispatchNotificationPermissionEvent(
@@ -780,6 +1086,42 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   private fun sendNotificationPermissionEventToRuntime(
+    eventName: String,
+    properties: Map<String, Any?>?,
+  ) {
+    if (!::webView.isInitialized) return
+
+    val payload = buildMap<String, Any?> {
+      put("name", eventName)
+      if (!properties.isNullOrEmpty()) {
+        put("properties", properties)
+      }
+    }
+    webView.sendBridgeMessage(
+      type = "action/event",
+      payload = toJsonObject(payload),
+    )
+  }
+
+  private fun dispatchPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>?,
+    journeyId: String?,
+  ) {
+    val scopedProperties = properties ?: emptyMap()
+    val receiver = runtimeDelegate as? PermissionEventReceiver
+    if (!journeyId.isNullOrBlank() && receiver != null) {
+      receiver.onPermissionEvent(
+        eventName = eventName,
+        properties = scopedProperties,
+      )
+      return
+    }
+
+    permissionRuntimeEventSink(eventName, properties)
+  }
+
+  private fun sendPermissionEventToRuntime(
     eventName: String,
     properties: Map<String, Any?>?,
   ) {
@@ -819,6 +1161,23 @@ class FlowView(context: Context) : FrameLayout(context) {
     )
   }
 
+  private fun rebindPendingPermissionRequestIfNeeded() {
+    val requestId = pendingPermissionRequestId ?: return
+    val permissionType = pendingPermissionType ?: return
+    val permission = resolveRuntimePermission(permissionType) ?: run {
+      clearPendingPermissionRequest()
+      return
+    }
+    val activity = findComponentActivity(context) ?: return
+    runtimePermissionHandler.requestPermission(
+      activity = activity,
+      permission = permission,
+      requestId = requestId,
+      launchIfNeeded = false,
+      onResult = permissionResultCallback(permissionType, pendingPermissionJourneyId),
+    )
+  }
+
   private fun notificationPermissionResultCallback(journeyId: String?): (Boolean) -> Unit {
     return { granted ->
       clearPendingNotificationPermissionRequest()
@@ -840,6 +1199,29 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
   }
 
+  private fun permissionResultCallback(
+    permissionType: String,
+    journeyId: String?,
+  ): (Boolean) -> Unit {
+    return { granted ->
+      clearPendingPermissionRequest()
+      val properties = buildPermissionEventProperties(journeyId, permissionType)
+      if (granted) {
+        emitPermissionEvent(
+          eventName = SystemEventNames.permissionGranted,
+          properties = properties,
+          journeyId = journeyId,
+        )
+      } else {
+        emitPermissionEvent(
+          eventName = SystemEventNames.permissionDenied,
+          properties = properties,
+          journeyId = journeyId,
+        )
+      }
+    }
+  }
+
   private fun clearPendingNotificationPermissionRequest() {
     val requestId = pendingNotificationPermissionRequestId
     pendingNotificationPermissionRequestId = null
@@ -849,21 +1231,40 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
   }
 
+  private fun clearPendingPermissionRequest() {
+    val requestId = pendingPermissionRequestId
+    pendingPermissionRequestId = null
+    pendingPermissionJourneyId = null
+    pendingPermissionType = null
+    if (requestId != null) {
+      RuntimePermissionRequestRegistry.clear(requestId)
+    }
+  }
+
   private class SavedState : View.BaseSavedState {
     var pendingNotificationPermissionRequestId: String? = null
     var pendingNotificationPermissionJourneyId: String? = null
+    var pendingPermissionRequestId: String? = null
+    var pendingPermissionJourneyId: String? = null
+    var pendingPermissionType: String? = null
 
     constructor(superState: Parcelable?) : super(superState)
 
     private constructor(source: Parcel) : super(source) {
       pendingNotificationPermissionRequestId = source.readString()
       pendingNotificationPermissionJourneyId = source.readString()
+      pendingPermissionRequestId = source.readString()
+      pendingPermissionJourneyId = source.readString()
+      pendingPermissionType = source.readString()
     }
 
     override fun writeToParcel(out: Parcel, flags: Int) {
       super.writeToParcel(out, flags)
       out.writeString(pendingNotificationPermissionRequestId)
       out.writeString(pendingNotificationPermissionJourneyId)
+      out.writeString(pendingPermissionRequestId)
+      out.writeString(pendingPermissionJourneyId)
+      out.writeString(pendingPermissionType)
     }
 
     companion object {

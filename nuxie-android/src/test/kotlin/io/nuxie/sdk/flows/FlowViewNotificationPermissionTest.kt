@@ -1,5 +1,6 @@
 package io.nuxie.sdk.flows
 
+import android.Manifest
 import android.content.Context
 import android.os.Build
 import android.os.Looper
@@ -29,6 +30,7 @@ class FlowViewNotificationPermissionTest {
   @Before
   fun resetNotificationPermissionRequestRegistry() {
     NotificationPermissionRequestRegistry.resetForTest()
+    RuntimePermissionRequestRegistry.resetForTest()
   }
 
   @Test
@@ -213,6 +215,149 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_emitsGrantedWhenPermissionAlreadyGranted() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = true)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(0, handler.requestInvocations)
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionGranted to
+          mapOf("journey_id" to "journey_1", "type" to "camera"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
+  fun requestPermission_requestsPhotosPermissionAndEmitsGranted() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    val triggered = mutableListOf<String>()
+    flowView.permissionEventSink = { event, _, _ -> triggered += event }
+
+    flowView.performRequestPermission("photos", "journey_1")
+    val request = handler.requests.single()
+    assertEquals(Manifest.permission.READ_MEDIA_IMAGES, request.permission)
+
+    handler.resolve(request.requestId, granted = true)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, handler.requestInvocations)
+    assertEquals(listOf(SystemEventNames.permissionGranted), triggered)
+  }
+
+  @Test
+  fun requestPermission_standaloneFlowRoutesResultToRuntimeOnly() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = true)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+    }
+
+    val runtimeEvents = mutableListOf<Pair<String, Map<String, Any?>?>>() 
+    flowView.permissionRuntimeEventSink = { event, properties ->
+      runtimeEvents += event to properties
+    }
+
+    flowView.performRequestPermission("microphone")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionGranted to mapOf("type" to "microphone"),
+      ),
+      runtimeEvents,
+    )
+  }
+
+  @Test
+  fun requestPermission_routesJourneyScopedResultsToDelegateReceiver() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = true)
+    val receiver = FakePermissionEventReceiver()
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+      runtimeDelegate = receiver
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionGranted to
+          mapOf("journey_id" to "journey_1", "type" to "camera"),
+      ),
+      receiver.events,
+    )
+    assertTrue(receiver.runtimeMessages.isEmpty())
+  }
+
+  @Test
+  fun requestPermission_rebindsPendingRequestAfterHierarchyStateRestore() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val stableViewId = R.id.nuxie_flow_view
+    val flowView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+    }
+
+    flowView.performRequestPermission("microphone", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val savedState = SparseArray<Parcelable>()
+    flowView.saveHierarchyState(savedState)
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    val restoredView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+      permissionEventSink = { event, properties, _ ->
+        triggered += event to properties
+      }
+    }
+    restoredView.restoreHierarchyState(savedState)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(2, handler.requests.size)
+    val initialRequest = handler.requests[0]
+    val reboundRequest = handler.requests[1]
+    assertEquals(Manifest.permission.RECORD_AUDIO, initialRequest.permission)
+    assertEquals(initialRequest.requestId, reboundRequest.requestId)
+    assertEquals(true, initialRequest.launchIfNeeded)
+    assertEquals(false, reboundRequest.launchIfNeeded)
+
+    handler.resolve(initialRequest.requestId, granted = true)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionGranted to
+          mapOf("journey_id" to "journey_1", "type" to "microphone"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
   fun notificationPermissionRequestRegistry_deliversPendingResultToReboundCallback() {
     val requestId = "req_1"
     var reboundGranted: Boolean? = null
@@ -322,6 +467,62 @@ private class FakeNotificationPermissionHandler(
     if (notificationsEnabledAfterRequest != null) {
       notificationsEnabled = notificationsEnabledAfterRequest
     }
+    callbacks.remove(requestId)?.invoke(granted)
+  }
+}
+
+private class FakePermissionEventReceiver : FlowRuntimeDelegate, PermissionEventReceiver {
+  val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+  val runtimeMessages = mutableListOf<Triple<String, JsonObject, String?>>()
+
+  override fun onRuntimeMessage(type: String, payload: JsonObject, id: String?) {
+    runtimeMessages += Triple(type, payload, id)
+  }
+
+  override fun onDismissRequested(reason: CloseReason) = Unit
+
+  override fun onPermissionEvent(eventName: String, properties: Map<String, Any?>) {
+    events += eventName to properties
+  }
+}
+
+private class FakeRuntimePermissionHandler(
+  private var permissionGranted: Boolean,
+) : RuntimePermissionHandler {
+  data class Request(
+    val permission: String,
+    val requestId: String,
+    val launchIfNeeded: Boolean,
+  )
+
+  var requestInvocations: Int = 0
+  val requests = mutableListOf<Request>()
+  private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
+
+  override fun isPermissionGranted(context: Context, permission: String): Boolean {
+    return permissionGranted
+  }
+
+  override fun requestPermission(
+    activity: ComponentActivity,
+    permission: String,
+    requestId: String,
+    launchIfNeeded: Boolean,
+    onResult: (Boolean) -> Unit,
+  ): Boolean {
+    requestInvocations += 1
+    requests +=
+      Request(
+        permission = permission,
+        requestId = requestId,
+        launchIfNeeded = launchIfNeeded,
+      )
+    callbacks[requestId] = onResult
+    return true
+  }
+
+  fun resolve(requestId: String, granted: Boolean) {
+    permissionGranted = granted
     callbacks.remove(requestId)?.invoke(granted)
   }
 }
