@@ -483,6 +483,40 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_dropsPhantomRestoredRequestAfterProcessDeath() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val stableViewId = R.id.nuxie_flow_view
+    val flowView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val savedState = SparseArray<Parcelable>()
+    flowView.saveHierarchyState(savedState)
+
+    RuntimePermissionRequestRegistry.resetForTest()
+
+    val restoredView = FlowView(activity).apply {
+      id = stableViewId
+      runtimePermissionHandler = handler
+    }
+    restoredView.restoreHierarchyState(savedState)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    restoredView.performRequestPermission("microphone", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(2, handler.requests.size)
+    val relaunchedRequest = handler.requests[1]
+    assertEquals(true, relaunchedRequest.launchIfNeeded)
+    assertEquals(listOf(Manifest.permission.RECORD_AUDIO), relaunchedRequest.permissions)
+  }
+
+  @Test
   fun notificationPermissionRequestRegistry_deliversPendingResultToReboundCallback() {
     val requestId = "req_1"
     var reboundGranted: Boolean? = null
@@ -623,7 +657,6 @@ private class FakeRuntimePermissionHandler(
 
   var requestInvocations: Int = 0
   val requests = mutableListOf<Request>()
-  private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
 
   override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
     return permissionGranted || permissions.any { permission -> grantedPermissions.contains(permission) }
@@ -643,12 +676,15 @@ private class FakeRuntimePermissionHandler(
         requestId = requestId,
         launchIfNeeded = launchIfNeeded,
       )
-    callbacks[requestId] = onResult
+    if (launchIfNeeded) {
+      RuntimePermissionRequestRegistry.markLaunched(requestId)
+    }
+    RuntimePermissionRequestRegistry.bind(requestId, onResult)
     return true
   }
 
   fun resolve(requestId: String, granted: Boolean) {
     permissionGranted = granted
-    callbacks.remove(requestId)?.invoke(granted)
+    RuntimePermissionRequestRegistry.complete(requestId, granted)
   }
 }

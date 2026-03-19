@@ -1240,6 +1240,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun rebindPendingPermissionRequestIfNeeded() {
     val requestId = pendingPermissionRequestId ?: return
     val permissionType = pendingPermissionType ?: return
+    if (!RuntimePermissionRequestRegistry.hasPendingWork(requestId)) {
+      clearPendingPermissionRequest(requestId)
+      drainNextPermissionRequest()
+      return
+    }
     val permissions = resolveRuntimePermissions(permissionType) ?: run {
       clearPendingPermissionRequest(requestId)
       return
