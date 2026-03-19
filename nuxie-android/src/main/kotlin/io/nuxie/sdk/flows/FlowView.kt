@@ -64,10 +64,10 @@ internal interface NotificationPermissionEventReceiver {
 }
 
 internal interface RuntimePermissionHandler {
-  fun isPermissionGranted(context: Context, permission: String): Boolean
-  fun requestPermission(
+  fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean
+  fun requestPermissions(
     activity: ComponentActivity,
-    permission: String,
+    permissions: List<String>,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
@@ -313,18 +313,21 @@ internal class DefaultNotificationPermissionHandler : NotificationPermissionHand
 
 internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
   private val activityResultLaunchers:
-    MutableMap<ComponentActivity, MutableMap<String, ActivityResultLauncher<String>>> = WeakHashMap()
+    MutableMap<ComponentActivity, MutableMap<String, ActivityResultLauncher<Array<String>>>> =
+    WeakHashMap()
 
-  override fun isPermissionGranted(context: Context, permission: String): Boolean {
-    return ContextCompat.checkSelfPermission(
-      context,
-      permission,
-    ) == PackageManager.PERMISSION_GRANTED
+  override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
+    return permissions.any { permission ->
+      ContextCompat.checkSelfPermission(
+        context,
+        permission,
+      ) == PackageManager.PERMISSION_GRANTED
+    }
   }
 
-  override fun requestPermission(
+  override fun requestPermissions(
     activity: ComponentActivity,
-    permission: String,
+    permissions: List<String>,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
@@ -340,7 +343,7 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
     return runCatching {
       val launcher = permissionLauncher(activity, requestId)
       if (shouldLaunch) {
-        launcher.launch(permission)
+        launcher.launch(permissions.toTypedArray())
       }
     }.onFailure {
       RuntimePermissionRequestRegistry.clear(requestId)
@@ -351,7 +354,7 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
   private fun permissionLauncher(
     activity: ComponentActivity,
     requestId: String,
-  ): ActivityResultLauncher<String> {
+  ): ActivityResultLauncher<Array<String>> {
     synchronized(activityResultLaunchers) {
       val launchersForActivity = activityResultLaunchers.getOrPut(activity) { mutableMapOf() }
       launchersForActivity[requestId]?.let { return it }
@@ -359,9 +362,12 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
       val launcher =
         activity.activityResultRegistry.register(
           permissionActivityResultKey(requestId),
-          ActivityResultContracts.RequestPermission(),
-        ) { granted ->
-          RuntimePermissionRequestRegistry.complete(requestId, granted)
+          ActivityResultContracts.RequestMultiplePermissions(),
+        ) { grantResults ->
+          RuntimePermissionRequestRegistry.complete(
+            requestId,
+            grantResults.values.any { granted -> granted },
+          )
           unregisterPermissionLauncher(activity, requestId)
         }
 
@@ -395,6 +401,11 @@ internal class DefaultRuntimePermissionHandler : RuntimePermissionHandler {
 }
 
 class FlowView(context: Context) : FrameLayout(context) {
+  private data class PendingPermissionRequest(
+    val requestId: String,
+    val permissionType: String,
+    val journeyId: String?,
+  )
 
   private enum class State {
     LOADING,
@@ -429,6 +440,7 @@ class FlowView(context: Context) : FrameLayout(context) {
   private var pendingPermissionRequestId: String? = null
   private var pendingPermissionJourneyId: String? = null
   private var pendingPermissionType: String? = null
+  private val queuedPermissionRequests = ArrayDeque<PendingPermissionRequest>()
   internal var notificationPermissionHandler: NotificationPermissionHandler = DefaultNotificationPermissionHandler()
   internal var runtimePermissionHandler: RuntimePermissionHandler = DefaultRuntimePermissionHandler()
   internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
@@ -960,33 +972,44 @@ class FlowView(context: Context) : FrameLayout(context) {
   }
 
   private fun handleRequestPermission(permissionType: String, journeyId: String?) {
-    val runtimePermission = resolveRuntimePermission(permissionType)
-    val properties = buildPermissionEventProperties(journeyId, permissionType)
+    val request = PendingPermissionRequest(UUID.randomUUID().toString(), permissionType, journeyId)
+    if (pendingPermissionRequestId != null) {
+      queuedPermissionRequests.addLast(request)
+      return
+    }
+    startPermissionRequest(request)
+  }
+
+  private fun startPermissionRequest(request: PendingPermissionRequest) {
+    val runtimePermissions = resolveRuntimePermissions(request.permissionType)
+    val properties = buildPermissionEventProperties(request.journeyId, request.permissionType)
     val emitGranted = {
       emitPermissionEvent(
         SystemEventNames.permissionGranted,
         properties,
-        journeyId,
+        request.journeyId,
       )
     }
     val emitDenied = {
       emitPermissionEvent(
         SystemEventNames.permissionDenied,
         properties,
-        journeyId,
+        request.journeyId,
       )
     }
 
-    if (runtimePermission == null) {
+    if (runtimePermissions == null) {
       NuxieLogger.warning(
-        "FlowView: Unsupported request permission type '$permissionType'; emitting denied",
+        "FlowView: Unsupported request permission type '${request.permissionType}'; emitting denied",
       )
       emitDenied()
+      drainNextPermissionRequest()
       return
     }
 
-    if (runtimePermissionHandler.isPermissionGranted(context, runtimePermission)) {
+    if (runtimePermissionHandler.hasPermissionAccess(context, runtimePermissions)) {
       emitGranted()
+      drainNextPermissionRequest()
       return
     }
 
@@ -996,36 +1019,42 @@ class FlowView(context: Context) : FrameLayout(context) {
         "FlowView: Runtime permission prompt requires a ComponentActivity host; emitting denied",
       )
       emitDenied()
+      drainNextPermissionRequest()
       return
     }
 
-    val requestId = pendingPermissionRequestId ?: UUID.randomUUID().toString()
-    pendingPermissionRequestId = requestId
-    pendingPermissionJourneyId = journeyId
-    pendingPermissionType = permissionType
+    pendingPermissionRequestId = request.requestId
+    pendingPermissionJourneyId = request.journeyId
+    pendingPermissionType = request.permissionType
     val launched =
-      runtimePermissionHandler.requestPermission(
+      runtimePermissionHandler.requestPermissions(
         activity = activity,
-        permission = runtimePermission,
-        requestId = requestId,
+        permissions = runtimePermissions,
+        requestId = request.requestId,
         launchIfNeeded = true,
-        onResult = permissionResultCallback(permissionType, journeyId),
+        onResult = permissionResultCallback(request),
       )
     if (!launched) {
-      clearPendingPermissionRequest()
+      clearPendingPermissionRequest(request.requestId)
       emitDenied()
+      drainNextPermissionRequest()
     }
   }
 
-  private fun resolveRuntimePermission(permissionType: String): String? {
+  private fun resolveRuntimePermissions(permissionType: String): List<String>? {
     return when (permissionType) {
-      "camera" -> Manifest.permission.CAMERA
-      "microphone" -> Manifest.permission.RECORD_AUDIO
+      "camera" -> listOf(Manifest.permission.CAMERA)
+      "microphone" -> listOf(Manifest.permission.RECORD_AUDIO)
       "photos" ->
-        if (sdkIntProvider() >= Build.VERSION_CODES.TIRAMISU) {
-          Manifest.permission.READ_MEDIA_IMAGES
+        if (sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+          listOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+          )
+        } else if (sdkIntProvider() >= Build.VERSION_CODES.TIRAMISU) {
+          listOf(Manifest.permission.READ_MEDIA_IMAGES)
         } else {
-          Manifest.permission.READ_EXTERNAL_STORAGE
+          listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
       else -> null
     }
@@ -1164,17 +1193,24 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun rebindPendingPermissionRequestIfNeeded() {
     val requestId = pendingPermissionRequestId ?: return
     val permissionType = pendingPermissionType ?: return
-    val permission = resolveRuntimePermission(permissionType) ?: run {
-      clearPendingPermissionRequest()
+    val permissions = resolveRuntimePermissions(permissionType) ?: run {
+      clearPendingPermissionRequest(requestId)
       return
     }
     val activity = findComponentActivity(context) ?: return
-    runtimePermissionHandler.requestPermission(
+    runtimePermissionHandler.requestPermissions(
       activity = activity,
-      permission = permission,
+      permissions = permissions,
       requestId = requestId,
       launchIfNeeded = false,
-      onResult = permissionResultCallback(permissionType, pendingPermissionJourneyId),
+      onResult =
+        permissionResultCallback(
+          PendingPermissionRequest(
+            requestId = requestId,
+            permissionType = permissionType,
+            journeyId = pendingPermissionJourneyId,
+          ),
+        ),
     )
   }
 
@@ -1199,26 +1235,24 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
   }
 
-  private fun permissionResultCallback(
-    permissionType: String,
-    journeyId: String?,
-  ): (Boolean) -> Unit {
+  private fun permissionResultCallback(request: PendingPermissionRequest): (Boolean) -> Unit {
     return { granted ->
-      clearPendingPermissionRequest()
-      val properties = buildPermissionEventProperties(journeyId, permissionType)
+      clearPendingPermissionRequest(request.requestId)
+      val properties = buildPermissionEventProperties(request.journeyId, request.permissionType)
       if (granted) {
         emitPermissionEvent(
           eventName = SystemEventNames.permissionGranted,
           properties = properties,
-          journeyId = journeyId,
+          journeyId = request.journeyId,
         )
       } else {
         emitPermissionEvent(
           eventName = SystemEventNames.permissionDenied,
           properties = properties,
-          journeyId = journeyId,
+          journeyId = request.journeyId,
         )
       }
+      drainNextPermissionRequest()
     }
   }
 
@@ -1231,13 +1265,20 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
   }
 
-  private fun clearPendingPermissionRequest() {
-    val requestId = pendingPermissionRequestId
-    pendingPermissionRequestId = null
-    pendingPermissionJourneyId = null
-    pendingPermissionType = null
-    if (requestId != null) {
-      RuntimePermissionRequestRegistry.clear(requestId)
+  private fun clearPendingPermissionRequest(requestId: String? = pendingPermissionRequestId) {
+    if (requestId == null) return
+    if (pendingPermissionRequestId == requestId) {
+      pendingPermissionRequestId = null
+      pendingPermissionJourneyId = null
+      pendingPermissionType = null
+    }
+    RuntimePermissionRequestRegistry.clear(requestId)
+  }
+
+  private fun drainNextPermissionRequest() {
+    if (pendingPermissionRequestId != null) return
+    while (pendingPermissionRequestId == null && queuedPermissionRequests.isNotEmpty()) {
+      startPermissionRequest(queuedPermissionRequests.removeFirst())
     }
   }
 

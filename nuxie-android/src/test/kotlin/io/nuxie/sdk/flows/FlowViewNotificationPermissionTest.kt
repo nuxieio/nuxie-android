@@ -254,13 +254,33 @@ class FlowViewNotificationPermissionTest {
 
     flowView.performRequestPermission("photos", "journey_1")
     val request = handler.requests.single()
-    assertEquals(Manifest.permission.READ_MEDIA_IMAGES, request.permission)
+    assertEquals(listOf(Manifest.permission.READ_MEDIA_IMAGES), request.permissions)
 
     handler.resolve(request.requestId, granted = true)
     shadowOf(Looper.getMainLooper()).idle()
 
     assertEquals(1, handler.requestInvocations)
     assertEquals(listOf(SystemEventNames.permissionGranted), triggered)
+  }
+
+  @Test
+  fun requestPermission_requestsExplicitSelectedPhotosAccessOnAndroid14() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.UPSIDE_DOWN_CAKE }
+    }
+
+    flowView.performRequestPermission("photos", "journey_1")
+
+    assertEquals(
+      listOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+      ),
+      handler.requests.single().permissions,
+    )
   }
 
   @Test
@@ -340,7 +360,7 @@ class FlowViewNotificationPermissionTest {
     assertEquals(2, handler.requests.size)
     val initialRequest = handler.requests[0]
     val reboundRequest = handler.requests[1]
-    assertEquals(Manifest.permission.RECORD_AUDIO, initialRequest.permission)
+    assertEquals(listOf(Manifest.permission.RECORD_AUDIO), initialRequest.permissions)
     assertEquals(initialRequest.requestId, reboundRequest.requestId)
     assertEquals(true, initialRequest.launchIfNeeded)
     assertEquals(false, reboundRequest.launchIfNeeded)
@@ -350,6 +370,49 @@ class FlowViewNotificationPermissionTest {
 
     assertEquals(
       listOf(
+        SystemEventNames.permissionGranted to
+          mapOf("journey_id" to "journey_1", "type" to "microphone"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
+  fun requestPermission_queuesLaterPromptsUntilTheCurrentPromptResolves() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestPermission("camera", "journey_1")
+    flowView.performRequestPermission("microphone", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, handler.requestInvocations)
+    val firstRequest = handler.requests.single()
+    assertEquals(listOf(Manifest.permission.CAMERA), firstRequest.permissions)
+
+    handler.resolve(firstRequest.requestId, granted = false)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(2, handler.requestInvocations)
+    val secondRequest = handler.requests[1]
+    assertNotEquals(firstRequest.requestId, secondRequest.requestId)
+    assertEquals(listOf(Manifest.permission.RECORD_AUDIO), secondRequest.permissions)
+
+    handler.resolve(secondRequest.requestId, granted = true)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionDenied to
+          mapOf("journey_id" to "journey_1", "type" to "camera"),
         SystemEventNames.permissionGranted to
           mapOf("journey_id" to "journey_1", "type" to "microphone"),
       ),
@@ -490,7 +553,7 @@ private class FakeRuntimePermissionHandler(
   private var permissionGranted: Boolean,
 ) : RuntimePermissionHandler {
   data class Request(
-    val permission: String,
+    val permissions: List<String>,
     val requestId: String,
     val launchIfNeeded: Boolean,
   )
@@ -499,13 +562,13 @@ private class FakeRuntimePermissionHandler(
   val requests = mutableListOf<Request>()
   private val callbacks = mutableMapOf<String, (Boolean) -> Unit>()
 
-  override fun isPermissionGranted(context: Context, permission: String): Boolean {
+  override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
     return permissionGranted
   }
 
-  override fun requestPermission(
+  override fun requestPermissions(
     activity: ComponentActivity,
-    permission: String,
+    permissions: List<String>,
     requestId: String,
     launchIfNeeded: Boolean,
     onResult: (Boolean) -> Unit,
@@ -513,7 +576,7 @@ private class FakeRuntimePermissionHandler(
     requestInvocations += 1
     requests +=
       Request(
-        permission = permission,
+        permissions = permissions,
         requestId = requestId,
         launchIfNeeded = launchIfNeeded,
       )
