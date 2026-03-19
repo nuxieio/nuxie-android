@@ -1175,7 +1175,9 @@ class FlowView(context: Context) : FrameLayout(context) {
       return PermissionRequestResolution.Granted
     }
 
-    if (!runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+    val launchRuntimePermissions =
+      resolveLaunchRuntimePermissions(request.permissionType, runtimePermissions)
+    if (launchRuntimePermissions == null) {
       NuxieLogger.warning(
         "FlowView: Host app manifest is missing required declarations for ${runtimePermissions.joinToString()}; emitting denied",
       )
@@ -1191,7 +1193,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     return PermissionRequestResolution.Launch(
-      runtimePermissions = runtimePermissions,
+      runtimePermissions = launchRuntimePermissions,
       activity = activity,
     )
   }
@@ -1215,6 +1217,11 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun resolveRuntimePermissions(permissionType: String): List<String>? {
     return when (permissionType) {
       "camera" -> listOf(Manifest.permission.CAMERA)
+      "location" ->
+        listOf(
+          Manifest.permission.ACCESS_FINE_LOCATION,
+          Manifest.permission.ACCESS_COARSE_LOCATION,
+        )
       "microphone" -> listOf(Manifest.permission.RECORD_AUDIO)
       "photos" ->
         if (sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -1235,6 +1242,16 @@ class FlowView(context: Context) : FrameLayout(context) {
     permissionType: String,
     runtimePermissions: List<String>,
   ): Boolean {
+    if (permissionType == "location") {
+      return runtimePermissionHandler.hasPermissionAccess(
+        context,
+        listOf(
+          Manifest.permission.ACCESS_FINE_LOCATION,
+          Manifest.permission.ACCESS_COARSE_LOCATION,
+        ),
+      )
+    }
+
     if (
       permissionType == "photos" &&
       sdkIntProvider() >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
@@ -1246,6 +1263,40 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     return runtimePermissionHandler.hasPermissionAccess(context, runtimePermissions)
+  }
+
+  private fun resolveLaunchRuntimePermissions(
+    permissionType: String,
+    runtimePermissions: List<String>,
+  ): List<String>? {
+    if (permissionType == "location") {
+      val hasFineLocationDeclaration =
+        runtimePermissionHandler.hasManifestDeclarations(
+          context,
+          listOf(Manifest.permission.ACCESS_FINE_LOCATION),
+        )
+      val hasCoarseLocationDeclaration =
+        runtimePermissionHandler.hasManifestDeclarations(
+          context,
+          listOf(Manifest.permission.ACCESS_COARSE_LOCATION),
+        )
+
+      return when {
+        hasFineLocationDeclaration && hasCoarseLocationDeclaration ->
+          listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+          )
+        hasCoarseLocationDeclaration -> listOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+        else -> null
+      }
+    }
+
+    return if (runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+      runtimePermissions
+    } else {
+      null
+    }
   }
 
   private fun buildNotificationEventProperties(journeyId: String?): Map<String, Any?>? {
@@ -1391,7 +1442,11 @@ class FlowView(context: Context) : FrameLayout(context) {
       drainNextPermissionRequest()
       return
     }
-    val permissions = resolveRuntimePermissions(permissionType) ?: run {
+    val runtimePermissions = resolveRuntimePermissions(permissionType) ?: run {
+      clearPendingPermissionRequest(requestId)
+      return
+    }
+    val permissions = resolveLaunchRuntimePermissions(permissionType, runtimePermissions) ?: run {
       clearPendingPermissionRequest(requestId)
       return
     }
