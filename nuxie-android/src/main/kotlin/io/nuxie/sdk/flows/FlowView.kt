@@ -1175,7 +1175,9 @@ class FlowView(context: Context) : FrameLayout(context) {
       return PermissionRequestResolution.Granted
     }
 
-    if (!runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+    val launchRuntimePermissions =
+      resolveLaunchRuntimePermissions(request.permissionType, runtimePermissions)
+    if (launchRuntimePermissions == null) {
       NuxieLogger.warning(
         "FlowView: Host app manifest is missing required declarations for ${runtimePermissions.joinToString()}; emitting denied",
       )
@@ -1191,7 +1193,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     return PermissionRequestResolution.Launch(
-      runtimePermissions = runtimePermissions,
+      runtimePermissions = launchRuntimePermissions,
       activity = activity,
     )
   }
@@ -1261,6 +1263,25 @@ class FlowView(context: Context) : FrameLayout(context) {
     }
 
     return runtimePermissionHandler.hasPermissionAccess(context, runtimePermissions)
+  }
+
+  private fun resolveLaunchRuntimePermissions(
+    permissionType: String,
+    runtimePermissions: List<String>,
+  ): List<String>? {
+    if (permissionType == "location") {
+      val declaredLocationPermissions =
+        runtimePermissions.filter { permission ->
+          runtimePermissionHandler.hasManifestDeclarations(context, listOf(permission))
+        }
+      return declaredLocationPermissions.ifEmpty { null }
+    }
+
+    return if (runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
+      runtimePermissions
+    } else {
+      null
+    }
   }
 
   private fun buildNotificationEventProperties(journeyId: String?): Map<String, Any?>? {
@@ -1406,7 +1427,11 @@ class FlowView(context: Context) : FrameLayout(context) {
       drainNextPermissionRequest()
       return
     }
-    val permissions = resolveRuntimePermissions(permissionType) ?: run {
+    val runtimePermissions = resolveRuntimePermissions(permissionType) ?: run {
+      clearPendingPermissionRequest(requestId)
+      return
+    }
+    val permissions = resolveLaunchRuntimePermissions(permissionType, runtimePermissions) ?: run {
       clearPendingPermissionRequest(requestId)
       return
     }
