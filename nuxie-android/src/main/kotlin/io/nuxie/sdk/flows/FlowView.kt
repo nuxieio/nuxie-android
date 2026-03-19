@@ -1003,7 +1003,7 @@ class FlowView(context: Context) : FrameLayout(context) {
 
   private fun handleRequestPermission(permissionType: String, journeyId: String?) {
     val request = PendingPermissionRequest(UUID.randomUUID().toString(), permissionType, journeyId)
-    if (pendingPermissionRequestId != null) {
+    if (pendingPermissionRequestId != null || pendingNotificationPermissionRequestId != null) {
       queuedPermissionRequests.addLast(request)
       return
     }
@@ -1284,6 +1284,7 @@ class FlowView(context: Context) : FrameLayout(context) {
           journeyId = journeyId,
         )
       }
+      drainNextPermissionRequest()
     }
   }
 
@@ -1291,7 +1292,15 @@ class FlowView(context: Context) : FrameLayout(context) {
     return { granted ->
       clearPendingPermissionRequest(request.requestId)
       val properties = buildPermissionEventProperties(request.journeyId, request.permissionType)
-      if (granted) {
+      val hasGrantedAccess =
+        if (granted) {
+          val runtimePermissions = resolveRuntimePermissions(request.permissionType)
+          runtimePermissions != null &&
+            hasSatisfiedPermissionAccess(request.permissionType, runtimePermissions)
+        } else {
+          false
+        }
+      if (hasGrantedAccess) {
         emitPermissionEvent(
           eventName = SystemEventNames.permissionGranted,
           properties = properties,

@@ -241,6 +241,36 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_waitsForNotificationPromptToResolve() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val notificationHandler =
+      FakeNotificationPermissionHandler(
+        notificationsEnabled = false,
+        permissionGranted = false,
+        notificationsEnabledAfterRequest = true,
+      )
+    val permissionHandler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      this.notificationPermissionHandler = notificationHandler
+      this.runtimePermissionHandler = permissionHandler
+      this.sdkIntProvider = { Build.VERSION_CODES.TIRAMISU }
+    }
+
+    flowView.performRequestNotifications("journey_1")
+    flowView.performRequestPermission("camera", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertTrue(permissionHandler.requests.isEmpty())
+
+    val notificationRequest = notificationHandler.requests.single()
+    notificationHandler.resolve(notificationRequest.requestId, granted = true)
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(1, permissionHandler.requests.size)
+    assertEquals(listOf(Manifest.permission.CAMERA), permissionHandler.requests.single().permissions)
+  }
+
+  @Test
   fun requestPermission_requestsPhotosPermissionAndEmitsGranted() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeRuntimePermissionHandler(permissionGranted = false)
@@ -306,6 +336,41 @@ class FlowViewNotificationPermissionTest {
         Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
       ),
       handler.requests.single().permissions,
+    )
+  }
+
+  @Test
+  fun requestPermission_emitsDeniedWhenOnlySelectedPhotosAccessIsGranted() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler = FakeRuntimePermissionHandler(permissionGranted = false)
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+      sdkIntProvider = { Build.VERSION_CODES.UPSIDE_DOWN_CAKE }
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestPermission("photos", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    val request = handler.requests.single()
+    handler.resolve(
+      request.requestId,
+      granted = true,
+      grantedPermissionsAfterRequest =
+        setOf(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED),
+    )
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionDenied to
+          mapOf("journey_id" to "journey_1", "type" to "photos"),
+      ),
+      triggered,
     )
   }
 
@@ -657,6 +722,7 @@ private class FakeRuntimePermissionHandler(
 
   var requestInvocations: Int = 0
   val requests = mutableListOf<Request>()
+  private val permissionsByRequestId = mutableMapOf<String, List<String>>()
 
   override fun hasPermissionAccess(context: Context, permissions: List<String>): Boolean {
     return permissionGranted || permissions.any { permission -> grantedPermissions.contains(permission) }
@@ -676,6 +742,7 @@ private class FakeRuntimePermissionHandler(
         requestId = requestId,
         launchIfNeeded = launchIfNeeded,
       )
+    permissionsByRequestId[requestId] = permissions
     if (launchIfNeeded) {
       RuntimePermissionRequestRegistry.markLaunched(requestId)
     }
@@ -683,8 +750,22 @@ private class FakeRuntimePermissionHandler(
     return true
   }
 
-  fun resolve(requestId: String, granted: Boolean) {
-    permissionGranted = granted
+  fun resolve(
+    requestId: String,
+    granted: Boolean,
+    grantedPermissionsAfterRequest: Set<String>? = null,
+  ) {
+    val requestedPermissions = permissionsByRequestId.remove(requestId).orEmpty()
+    if (grantedPermissionsAfterRequest != null) {
+      permissionGranted = false
+      grantedPermissions.clear()
+      grantedPermissions.addAll(grantedPermissionsAfterRequest)
+    } else {
+      permissionGranted = false
+      if (granted) {
+        grantedPermissions.addAll(requestedPermissions)
+      }
+    }
     RuntimePermissionRequestRegistry.complete(requestId, granted)
   }
 }
