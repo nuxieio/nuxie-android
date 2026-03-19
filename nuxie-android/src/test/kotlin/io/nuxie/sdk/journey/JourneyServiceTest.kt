@@ -202,7 +202,7 @@ class JourneyServiceTest {
   }
 
   @Test
-  fun explicitGoalAction_latchesConversionAndExitsImmediately() = runBlocking {
+  fun explicitGoalAction_defersExitUntilDismissWhenFlowIsPresented() = runBlocking {
     val interactions = mapOf(
       "__global__" to listOf(
         Interaction(
@@ -235,6 +235,8 @@ class JourneyServiceTest {
     )
     try {
       harness.service.initialize()
+      val updates = mutableListOf<TriggerUpdate>()
+      harness.broker.register("evt_1") { updates += it }
 
       val started = harness.service.handleEventForTrigger(
         NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
@@ -246,10 +248,80 @@ class JourneyServiceTest {
         payload = JsonObject(emptyMap()),
         id = null,
       )
-      delay(50)
+      delay(80)
 
       val active = harness.service.getActiveJourneys("user_1")
-      assertTrue(active.isEmpty())
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertNotNull(active.first().convertedAtEpochMillis)
+      assertTrue(updates.none { it is TriggerUpdate.Journey })
+
+      harness.service.handleRuntimeDismiss(started.journey.id, CloseReason.UserDismissed)
+      delay(80)
+
+      val journeyUpdate = updates.filterIsInstance<TriggerUpdate.Journey>().firstOrNull()
+      assertNotNull(journeyUpdate)
+      assertEquals(JourneyExitReason.GOAL_MET, journeyUpdate?.journey?.exitReason)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun explicitGoalAction_honorsBeforeSendDrop() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Goal(goalId = "primary")),
+          enabled = true,
+        )
+      )
+    )
+    val explicitGoal = GoalConfig(
+      kind = GoalConfig.Kind.EVENT,
+      eventName = JourneyEvents.journeyGoalHit,
+      eventFilter = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.PredAnd(
+          listOf(
+            IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+            IRExpr.Pred("eq", "goal_id", IRExpr.String("primary")),
+          )
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = explicitGoal,
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+      beforeSend = { event ->
+        if (event.name == JourneyEvents.journeyGoalHit) null else event
+      },
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_drop", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+      assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
     } finally {
       harness.close()
     }
@@ -1045,14 +1117,11 @@ class JourneyServiceTest {
     interactions: Map<String, List<Interaction>> = emptyMap(),
     goal: GoalConfig? = null,
     exitPolicy: ExitPolicy? = null,
-<<<<<<< HEAD
     beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
-=======
->>>>>>> f219980 (fix: address explicit goal action review feedback)
     onCallDelegate: suspend (journeyId: String, campaignId: String?, message: String, payload: Any?) -> Unit = { _, _, _, _ -> },
     onPurchaseRequested: suspend (journeyId: String, campaignId: String?, screenId: String?, productId: String, placementIndex: Any?) -> Unit = { _, _, _, _, _ -> },
     onRestoreRequested: suspend (journeyId: String, campaignId: String?, screenId: String?) -> Unit = { _, _, _ -> },

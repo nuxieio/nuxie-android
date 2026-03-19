@@ -102,8 +102,8 @@ class FlowJourneyRunner(
   private val irRuntime: IRRuntime,
   private val scope: CoroutineScope,
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
-  private val onGoalActionHit: suspend (goalId: String, goalLabel: String?) -> GoalActionResolution =
-    { _, _ -> GoalActionResolution() },
+  private val onGoalActionHit: suspend (goalEvent: NuxieEvent) -> GoalActionResolution =
+    { GoalActionResolution() },
 ) {
   private sealed class ActionResult {
     data object Continue : ActionResult()
@@ -1330,17 +1330,21 @@ class FlowJourneyRunner(
     context: RuntimeTriggerContext,
   ): ActionResult {
     val goalId = action.goalId.ifBlank { "primary" }
-    eventService.track(
-      JourneyEvents.journeyGoalHit,
-      properties = JourneyEvents.journeyGoalHitProperties(
-        journey = journey,
-        screenId = context.screenId ?: journey.flowState.currentScreenId,
-        interactionId = context.interactionId,
-        goalId = goalId,
-        goalLabel = action.label,
+    val goalEvent = runCatching {
+      eventService.prepareTriggerEvent(
+        JourneyEvents.journeyGoalHit,
+        properties = JourneyEvents.journeyGoalHitProperties(
+          journey = journey,
+          screenId = context.screenId ?: journey.flowState.currentScreenId,
+          interactionId = context.interactionId,
+          goalId = goalId,
+          goalLabel = action.label,
+        )
       )
-    )
-    val resolution = onGoalActionHit(goalId, action.label)
+    }.getOrNull() ?: return ActionResult.Continue
+
+    eventService.trackPreparedEvent(goalEvent)
+    val resolution = onGoalActionHit(goalEvent)
     return if (resolution.shouldExit) {
       ActionResult.Exit(JourneyExitReason.GOAL_MET)
     } else {

@@ -128,26 +128,30 @@ class EventService(
       nuxieEvent
     }
 
+    trackPreparedEvent(finalEvent)
+  }
+
+  fun trackPreparedEvent(event: NuxieEvent) {
     // Mirror iOS route(): user property extraction is driven by local events.
-    extractUserProperties(finalEvent)
+    extractUserProperties(event)
 
     // Store event locally (best-effort) for IR evaluation (segments/journeys).
     scope.launch {
-      runCatching { historyStore.insert(storedEvent(finalEvent)) }
+      runCatching { historyStore.insert(storedEvent(event)) }
     }
 
-    val propsJson: JsonObject = toJsonObject(finalEvent.properties)
-    val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)
+    val propsJson: JsonObject = toJsonObject(event.properties)
+    val anonDistinctId = (event.properties["\$anon_distinct_id"] as? String)
 
     val queued = QueuedEvent(
-      id = finalEvent.id,
-      name = finalEvent.name,
-      distinctId = finalEvent.distinctId,
+      id = event.id,
+      name = event.name,
+      distinctId = event.distinctId,
       anonDistinctId = anonDistinctId,
-      timestamp = finalEvent.timestamp,
+      timestamp = event.timestamp,
       properties = propsJson,
-      value = (finalEvent.properties["value"] as? Number)?.toDouble(),
-      entityId = finalEvent.properties["entityId"] as? String,
+      value = (event.properties["value"] as? Number)?.toDouble(),
+      entityId = event.properties["entityId"] as? String,
     )
 
     scope.launch {

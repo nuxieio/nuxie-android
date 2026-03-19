@@ -837,8 +837,8 @@ class JourneyService(
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,
-      onGoalActionHit = { goalId, _ ->
-        handleExplicitGoalActionHit(journey, goalId)
+      onGoalActionHit = { goalEvent ->
+        handleExplicitGoalActionHit(journey, goalEvent)
       },
     )
     flowRunners[journey.id] = runner
@@ -1001,8 +1001,9 @@ class JourneyService(
 
   private suspend fun handleExplicitGoalActionHit(
     journey: Journey,
-    goalId: String,
+    goalEvent: NuxieEvent,
   ): GoalActionResolution {
+    val goalId = explicitGoalIdForJourney(journey, goalEvent) ?: return GoalActionResolution()
     val hitAtEpochMillis = nowEpochMillis()
     val didRecordHit = recordExplicitGoalHit(journey, goalId, hitAtEpochMillis)
 
@@ -1010,7 +1011,7 @@ class JourneyService(
       if (didRecordHit) {
         persistJourney(journey)
       }
-      return GoalActionResolution(shouldExit = shouldExitOnGoal(journey))
+      return GoalActionResolution(shouldExit = shouldExitImmediatelyOnGoal(journey))
     }
 
     val goal = journey.goalSnapshot
@@ -1061,7 +1062,7 @@ class JourneyService(
     }
 
     latchGoalConversion(journey, metAtEpochMillis)
-    return GoalActionResolution(shouldExit = shouldExitOnGoal(journey))
+    return GoalActionResolution(shouldExit = shouldExitImmediatelyOnGoal(journey))
   }
 
   private fun latchGoalConversion(journey: Journey, metAtEpochMillis: Long) {
@@ -1092,6 +1093,10 @@ class JourneyService(
       ExitPolicy.Mode.ON_STOP_MATCHING,
       -> false
     }
+  }
+
+  private fun shouldExitImmediatelyOnGoal(journey: Journey): Boolean {
+    return shouldExitOnGoal(journey) && !shouldDeferExitDecision(journey.id)
   }
 
   private fun isWithinGoalWindow(journey: Journey, atEpochMillis: Long): Boolean {
@@ -1129,6 +1134,15 @@ class JourneyService(
     return true
   }
 
+  private fun explicitGoalIdForJourney(journey: Journey, goalEvent: NuxieEvent): String? {
+    if (goalEvent.name != JourneyEvents.journeyGoalHit) return null
+
+    val eventJourneyId = goalEvent.properties["journey_id"] as? String
+    if (eventJourneyId != journey.id) return null
+
+    return goalEvent.properties["goal_id"] as? String
+  }
+
   private fun compiledExplicitGoalIds(goal: GoalConfig): List<String>? {
     return when (goal.kind) {
       GoalConfig.Kind.EVENT -> {
@@ -1146,7 +1160,12 @@ class JourneyService(
   }
 
   private fun compiledExplicitGoalIdsFromAttributeExpr(expr: IRExpr): List<String>? {
-    val args = (expr as? IRExpr.And)?.args ?: return null
+    val args =
+      when (expr) {
+        is IRExpr.And -> expr.args
+        is IRExpr.EventsExists -> listOf(expr)
+        else -> return null
+      }
     val goalIds = mutableListOf<String>()
     for (arg in args) {
       val exists = arg as? IRExpr.EventsExists ?: return null
