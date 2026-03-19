@@ -16,6 +16,7 @@ import io.nuxie.sdk.flows.FlowRuntimeDelegate
 import io.nuxie.sdk.flows.FlowService
 import io.nuxie.sdk.flows.FlowView
 import io.nuxie.sdk.flows.NotificationPermissionEventReceiver
+import io.nuxie.sdk.flows.PermissionEventReceiver
 import io.nuxie.sdk.flows.InteractionTrigger
 import io.nuxie.sdk.flows.VmPathRef
 import io.nuxie.sdk.identity.IdentityService
@@ -365,6 +366,11 @@ class JourneyService(
         runtimeDelegates[journeyId]?.performRequestNotifications(journey.id)
       }
 
+      "action/request_permission" -> {
+        val permissionType = payload.string("permissionType") ?: return
+        runtimeDelegates[journeyId]?.performRequestPermission(permissionType, journey.id)
+      }
+
       "action/open_link" -> {
         val screenId = payload.string("screenId") ?: journey.flowState.currentScreenId
         val instanceId = payload.string("instanceId")
@@ -495,6 +501,76 @@ class JourneyService(
       }.onFailure { error ->
         NuxieLogger.warning(
           "JourneyService: Failed to track scoped notification event: ${error.message}",
+          error,
+        )
+      }
+    }
+
+    val transientEvent = storedEvent(event)
+
+    evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
+    if (!shouldDeferExitDecision(journey.id)) {
+      val exit = exitDecision(journey, campaign)
+      if (exit != null) {
+        completeJourney(journey, exit)
+        return
+      }
+    }
+
+    val pending = journey.flowState.pendingAction
+    if (pending != null && pending.kind == FlowPendingActionKind.WAIT_UNTIL) {
+      val runner = flowRunners[journey.id]
+      if (runner != null) {
+        val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
+        handleOutcome(outcome, journey)
+      }
+      if (journey.status.isLive) {
+        persistJourney(journey)
+      }
+      return
+    }
+
+    val runner = flowRunners[journey.id]
+    if (runner != null) {
+      val outcome = runner.dispatchEventTrigger(event)
+      handleOutcome(outcome, journey)
+    }
+    if (journey.status.isLive) {
+      persistJourney(journey)
+    }
+  }
+
+  suspend fun handleScopedPermissionEvent(
+    journeyId: String,
+    eventName: String,
+    properties: Map<String, Any?>,
+  ) {
+    val journey = inMemoryJourneysById[journeyId] ?: return
+    val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
+
+    val event = try {
+      eventService.prepareTriggerEvent(
+        event = eventName,
+        properties = properties,
+      )
+    } catch (error: Throwable) {
+      NuxieLogger.warning(
+        "JourneyService: Failed to prepare scoped permission event: ${error.message}",
+        error,
+      )
+      return
+    }
+
+    scope.launch {
+      runCatching {
+        eventService.trackForTrigger(
+          eventName,
+          properties = properties,
+          persistToHistory = false,
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning(
+          "JourneyService: Failed to track scoped permission event: ${error.message}",
           error,
         )
       }
@@ -1131,7 +1207,7 @@ private class FlowRuntimeDelegateAdapter(
   private val journeyId: String,
   private val journeyService: JourneyService,
   private val scope: CoroutineScope,
-) : FlowRuntimeDelegate, FlowJourneyHost, NotificationPermissionEventReceiver {
+) : FlowRuntimeDelegate, FlowJourneyHost, NotificationPermissionEventReceiver, PermissionEventReceiver {
   @Volatile private var flowView: FlowView? = null
 
   fun attachFlowView(view: FlowView) {
@@ -1172,12 +1248,29 @@ private class FlowRuntimeDelegateAdapter(
     flowView?.performRequestNotifications(journeyId)
   }
 
+  override suspend fun performRequestPermission(permissionType: String, journeyId: String?) {
+    flowView?.performRequestPermission(permissionType, journeyId)
+  }
+
   override fun onNotificationPermissionEvent(
     eventName: String,
     properties: Map<String, Any?>,
   ) {
     scope.launch {
       journeyService.handleScopedNotificationPermissionEvent(
+        journeyId = journeyId,
+        eventName = eventName,
+        properties = properties,
+      )
+    }
+  }
+
+  override fun onPermissionEvent(
+    eventName: String,
+    properties: Map<String, Any?>,
+  ) {
+    scope.launch {
+      journeyService.handleScopedPermissionEvent(
         journeyId = journeyId,
         eventName = eventName,
         properties = properties,

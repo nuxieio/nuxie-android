@@ -336,6 +336,11 @@ sealed interface InteractionAction {
   data object RequestNotifications : InteractionAction
 
   @Serializable
+  data class RequestPermission(
+    val permissionType: String,
+  ) : InteractionAction
+
+  @Serializable
   data class OpenLink(
     val url: JsonElement,
     val target: String? = null,
@@ -442,6 +447,7 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       "purchase" -> input.json.decodeFromJsonElement(InteractionAction.Purchase.serializer(), el)
       "restore" -> InteractionAction.Restore
       "request_notifications" -> InteractionAction.RequestNotifications
+      "request_permission" -> input.json.decodeFromJsonElement(InteractionAction.RequestPermission.serializer(), el)
       "open_link" -> input.json.decodeFromJsonElement(InteractionAction.OpenLink.serializer(), el)
       "dismiss" -> input.json.decodeFromJsonElement(InteractionAction.Dismiss.serializer(), el)
       "call_delegate" -> input.json.decodeFromJsonElement(InteractionAction.CallDelegate.serializer(), el)
@@ -530,6 +536,9 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       }
       is InteractionAction.Restore -> encodeWithType("restore") {}
       is InteractionAction.RequestNotifications -> encodeWithType("request_notifications") {}
+      is InteractionAction.RequestPermission -> encodeWithType("request_permission") {
+        put("permissionType", value.permissionType)
+      }
       is InteractionAction.OpenLink -> encodeWithType("open_link") {
         put("url", value.url)
         if (value.target != null) put("target", value.target)

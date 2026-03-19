@@ -78,6 +78,7 @@ interface FlowJourneyHost {
   suspend fun performPurchase(productId: String, placementIndex: Any?)
   suspend fun performRestore()
   suspend fun performRequestNotifications(journeyId: String?)
+  suspend fun performRequestPermission(permissionType: String, journeyId: String?)
   suspend fun performOpenLink(url: String, target: String?)
   suspend fun performDismiss()
   suspend fun performBack(steps: Int?, transition: JsonElement?)
@@ -504,6 +505,11 @@ class FlowJourneyRunner(
           trackAction(action, context, error = null)
           result
         }
+        is InteractionAction.RequestPermission -> {
+          val result = handleRequestPermission(action, context)
+          trackAction(action, context, error = null)
+          result
+        }
         is InteractionAction.OpenLink -> {
           val result = handleOpenLink(action, context)
           trackAction(action, context, error = null)
@@ -898,6 +904,14 @@ class FlowJourneyRunner(
     context: RuntimeTriggerContext,
   ): ActionResult {
     host?.performRequestNotifications(journey.id)
+    return ActionResult.Continue
+  }
+
+  private suspend fun handleRequestPermission(
+    action: InteractionAction.RequestPermission,
+    context: RuntimeTriggerContext,
+  ): ActionResult {
+    host?.performRequestPermission(action.permissionType, journey.id)
     return ActionResult.Continue
   }
 
@@ -1630,6 +1644,7 @@ private val InteractionAction.actionType: String
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"
     is InteractionAction.RequestNotifications -> "request_notifications"
+    is InteractionAction.RequestPermission -> "request_permission"
     is InteractionAction.OpenLink -> "open_link"
     is InteractionAction.Dismiss -> "dismiss"
     is InteractionAction.CallDelegate -> "call_delegate"

@@ -19,4 +19,6 @@ object SystemEventNames {
 
   const val notificationsEnabled: String = "\$notifications_enabled"
   const val notificationsDenied: String = "\$notifications_denied"
+  const val permissionGranted: String = "\$permission_granted"
+  const val permissionDenied: String = "\$permission_denied"
 }
