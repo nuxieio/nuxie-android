@@ -485,6 +485,11 @@ class FlowJourneyRunner(
           trackAction(action, context, error = null)
           ActionResult.Continue
         }
+        is InteractionAction.Goal -> {
+          handleGoal(action, context)
+          trackAction(action, context, error = null)
+          ActionResult.Continue
+        }
         is InteractionAction.UpdateCustomer -> {
           handleUpdateCustomer(action, context)
           trackAction(action, context, error = null)
@@ -1314,6 +1319,19 @@ class FlowJourneyRunner(
     )
   }
 
+  private fun handleGoal(action: InteractionAction.Goal, context: RuntimeTriggerContext) {
+    eventService.track(
+      JourneyEvents.journeyGoalHit,
+      properties = JourneyEvents.journeyGoalHitProperties(
+        journey = journey,
+        screenId = context.screenId ?: journey.flowState.currentScreenId,
+        interactionId = context.interactionId,
+        goalId = action.goalId.ifBlank { "primary" },
+        goalLabel = action.label,
+      )
+    )
+  }
+
   private fun sendViewModelInit() {
     warnConvertersIfNeeded()
     val payload = buildJsonObject(
@@ -1640,6 +1658,7 @@ private val InteractionAction.actionType: String
     is InteractionAction.Condition -> "condition"
     is InteractionAction.Experiment -> "experiment"
     is InteractionAction.SendEvent -> "send_event"
+    is InteractionAction.Goal -> "goal"
     is InteractionAction.UpdateCustomer -> "update_customer"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"
