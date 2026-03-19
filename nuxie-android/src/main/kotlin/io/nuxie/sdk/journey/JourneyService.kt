@@ -5,6 +5,7 @@ import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
 import io.nuxie.sdk.campaigns.ExitPolicy
+import io.nuxie.sdk.campaigns.GoalConfig
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
@@ -21,6 +22,7 @@ import io.nuxie.sdk.flows.InteractionTrigger
 import io.nuxie.sdk.flows.VmPathRef
 import io.nuxie.sdk.identity.IdentityService
 import io.nuxie.sdk.ir.IRFeatureQueries
+import io.nuxie.sdk.ir.IRExpr
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
@@ -55,6 +57,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 sealed class JourneyTriggerResult {
   data class Started(val journey: Journey) : JourneyTriggerResult()
@@ -114,6 +117,10 @@ class JourneyService(
     steps: Int,
   ) -> Unit = { _, _, _, _ -> },
 ) {
+  companion object {
+    private const val EXPLICIT_GOAL_HITS_CONTEXT_KEY = "__explicit_goal_hits"
+  }
+
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
   private val flowRunners: MutableMap<String, FlowJourneyRunner> = mutableMapOf()
   private val runtimeDelegates: MutableMap<String, FlowRuntimeDelegateAdapter> = mutableMapOf()
@@ -830,6 +837,9 @@ class JourneyService(
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,
+      onGoalActionHit = { goalId, _ ->
+        handleExplicitGoalActionHit(journey, goalId)
+      },
     )
     flowRunners[journey.id] = runner
 
@@ -984,23 +994,194 @@ class JourneyService(
 
     val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = transientEvents)
     if (result.met && result.atEpochMillis != null) {
-      val metAt = result.atEpochMillis
-      if (metAt == null) return
-      journey.convertedAtEpochMillis = metAt
-      journey.updatedAtEpochMillis = nowEpochMillis()
-      persistJourney(journey)
-
-      eventService.track(
-        JourneyEvents.journeyGoalMet,
-        properties = mapOf(
-          "journey_id" to journey.id,
-          "campaign_id" to journey.campaignId,
-          "goal_kind" to journey.goalSnapshot?.kind?.name?.lowercase(),
-          "met_at" to (metAt / 1000.0),
-          "window_seconds" to journey.conversionWindowSeconds,
-        )
-      )
+      val metAt = result.atEpochMillis ?: return
+      latchGoalConversion(journey, metAt)
     }
+  }
+
+  private suspend fun handleExplicitGoalActionHit(
+    journey: Journey,
+    goalId: String,
+  ): GoalActionResolution {
+    val hitAtEpochMillis = nowEpochMillis()
+    val didRecordHit = recordExplicitGoalHit(journey, goalId, hitAtEpochMillis)
+
+    if (journey.convertedAtEpochMillis != null) {
+      if (didRecordHit) {
+        persistJourney(journey)
+      }
+      return GoalActionResolution(shouldExit = shouldExitOnGoal(journey))
+    }
+
+    val goal = journey.goalSnapshot
+    val explicitGoalIds = goal?.let { compiledExplicitGoalIds(it) }
+    if (goal == null || explicitGoalIds == null) {
+      if (didRecordHit) {
+        persistJourney(journey)
+      }
+      return GoalActionResolution()
+    }
+
+    val metAtEpochMillis =
+      when (goal.kind) {
+        GoalConfig.Kind.EVENT -> {
+          if (
+            explicitGoalIds.size == 1 &&
+              explicitGoalIds.first() == goalId &&
+              isWithinGoalWindow(journey, hitAtEpochMillis)
+          ) {
+            explicitGoalHitEpochMillis(journey)[goalId]
+          } else {
+            null
+          }
+        }
+        GoalConfig.Kind.ATTRIBUTE -> {
+          if (!isWithinGoalWindow(journey, hitAtEpochMillis)) {
+            null
+          } else {
+            val hits = explicitGoalHitEpochMillis(journey)
+            val requiredHits = explicitGoalIds.mapNotNull { hits[it] }
+            if (requiredHits.size == explicitGoalIds.size) {
+              requiredHits.maxOrNull()
+            } else {
+              null
+            }
+          }
+        }
+        GoalConfig.Kind.SEGMENT_ENTER,
+        GoalConfig.Kind.SEGMENT_LEAVE,
+        -> null
+      }
+
+    if (metAtEpochMillis == null) {
+      if (didRecordHit) {
+        persistJourney(journey)
+      }
+      return GoalActionResolution()
+    }
+
+    latchGoalConversion(journey, metAtEpochMillis)
+    return GoalActionResolution(shouldExit = shouldExitOnGoal(journey))
+  }
+
+  private fun latchGoalConversion(journey: Journey, metAtEpochMillis: Long) {
+    if (journey.convertedAtEpochMillis != null) return
+
+    journey.convertedAtEpochMillis = metAtEpochMillis
+    journey.updatedAtEpochMillis = nowEpochMillis()
+    persistJourney(journey)
+
+    eventService.track(
+      JourneyEvents.journeyGoalMet,
+      properties = mapOf(
+        "journey_id" to journey.id,
+        "campaign_id" to journey.campaignId,
+        "goal_kind" to journey.goalSnapshot?.kind?.name?.lowercase(),
+        "met_at" to (metAtEpochMillis / 1000.0),
+        "window_seconds" to journey.conversionWindowSeconds,
+      )
+    )
+  }
+
+  private fun shouldExitOnGoal(journey: Journey): Boolean {
+    return when (journey.exitPolicySnapshot?.mode ?: ExitPolicy.Mode.NEVER) {
+      ExitPolicy.Mode.ON_GOAL,
+      ExitPolicy.Mode.ON_GOAL_OR_STOP,
+      -> true
+      ExitPolicy.Mode.NEVER,
+      ExitPolicy.Mode.ON_STOP_MATCHING,
+      -> false
+    }
+  }
+
+  private fun isWithinGoalWindow(journey: Journey, atEpochMillis: Long): Boolean {
+    if (journey.conversionWindowSeconds <= 0) return true
+    val windowEndEpochMillis =
+      journey.conversionAnchorAtEpochMillis + (journey.conversionWindowSeconds * 1000.0).toLong()
+    return atEpochMillis <= windowEndEpochMillis
+  }
+
+  private fun explicitGoalHitEpochMillis(journey: Journey): Map<String, Long> {
+    val raw = journey.getContextObject(EXPLICIT_GOAL_HITS_CONTEXT_KEY) ?: return emptyMap()
+    return raw.mapNotNull { (goalId, value) ->
+      val epochMillis =
+        value.jsonPrimitive.longOrNull
+          ?: value.jsonPrimitive.doubleOrNull?.toLong()
+          ?: value.jsonPrimitive.intOrNull?.toLong()
+      epochMillis?.let { goalId to it }
+    }.toMap()
+  }
+
+  private fun recordExplicitGoalHit(
+    journey: Journey,
+    goalId: String,
+    hitAtEpochMillis: Long,
+  ): Boolean {
+    val goalHits = explicitGoalHitEpochMillis(journey).toMutableMap()
+    if (goalHits.containsKey(goalId)) return false
+
+    goalHits[goalId] = hitAtEpochMillis
+    journey.setContextJson(
+      EXPLICIT_GOAL_HITS_CONTEXT_KEY,
+      JsonObject(goalHits.mapValues { JsonPrimitive(it.value) }),
+      nowEpochMillis(),
+    )
+    return true
+  }
+
+  private fun compiledExplicitGoalIds(goal: GoalConfig): List<String>? {
+    return when (goal.kind) {
+      GoalConfig.Kind.EVENT -> {
+        if (goal.eventName != JourneyEvents.journeyGoalHit) return null
+        compiledExplicitGoalId(goal.eventFilter?.expr)?.let(::listOf)
+      }
+      GoalConfig.Kind.ATTRIBUTE -> {
+        val expr = goal.attributeExpr?.expr ?: return null
+        compiledExplicitGoalIdsFromAttributeExpr(expr)
+      }
+      GoalConfig.Kind.SEGMENT_ENTER,
+      GoalConfig.Kind.SEGMENT_LEAVE,
+      -> null
+    }
+  }
+
+  private fun compiledExplicitGoalIdsFromAttributeExpr(expr: IRExpr): List<String>? {
+    val args = (expr as? IRExpr.And)?.args ?: return null
+    val goalIds = mutableListOf<String>()
+    for (arg in args) {
+      val exists = arg as? IRExpr.EventsExists ?: return null
+      if (exists.name != JourneyEvents.journeyGoalHit) return null
+      val goalId = compiledExplicitGoalId(exists.whereExpr) ?: return null
+      goalIds += goalId
+    }
+    return goalIds.takeIf { it.isNotEmpty() }
+  }
+
+  private fun compiledExplicitGoalId(expr: IRExpr?): String? {
+    val predicates =
+      when (expr) {
+        is IRExpr.Pred -> listOf(expr)
+        is IRExpr.PredAnd -> expr.args.mapNotNull { it as? IRExpr.Pred }
+        else -> return null
+      }
+
+    var goalId: String? = null
+    var hasJourneyScope = false
+    for (predicate in predicates) {
+      if (predicate.op != "eq") continue
+      when (predicate.key) {
+        "goal_id" -> {
+          goalId = (predicate.value as? IRExpr.String)?.value
+        }
+        "journey_id" -> {
+          if (predicate.value is IRExpr.JourneyId) {
+            hasJourneyScope = true
+          }
+        }
+      }
+    }
+
+    return if (hasJourneyScope) goalId else null
   }
 
   private suspend fun exitDecision(journey: Journey, campaign: Campaign): JourneyExitReason? {
