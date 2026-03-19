@@ -417,6 +417,36 @@ class FlowViewNotificationPermissionTest {
   }
 
   @Test
+  fun requestPermission_emitsDeniedWhenOnlyFineLocationIsDeclaredInManifest() {
+    val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+    val handler =
+      FakeRuntimePermissionHandler(
+        permissionGranted = false,
+        declaredPermissions = mutableSetOf(Manifest.permission.ACCESS_FINE_LOCATION),
+      )
+    val flowView = FlowView(activity).apply {
+      runtimePermissionHandler = handler
+    }
+
+    val triggered = mutableListOf<Pair<String, Map<String, Any?>?>>()
+    flowView.permissionEventSink = { event, properties, _ ->
+      triggered += event to properties
+    }
+
+    flowView.performRequestPermission("location", "journey_1")
+    shadowOf(Looper.getMainLooper()).idle()
+
+    assertEquals(0, handler.requestInvocations)
+    assertEquals(
+      listOf(
+        SystemEventNames.permissionDenied to
+          mapOf("journey_id" to "journey_1", "type" to "location"),
+      ),
+      triggered,
+    )
+  }
+
+  @Test
   fun requestPermission_emitsGrantedWhenOnlyCoarseLocationIsGranted() {
     val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
     val handler = FakeRuntimePermissionHandler(permissionGranted = false)

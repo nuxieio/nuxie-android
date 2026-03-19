@@ -1270,11 +1270,26 @@ class FlowView(context: Context) : FrameLayout(context) {
     runtimePermissions: List<String>,
   ): List<String>? {
     if (permissionType == "location") {
-      val declaredLocationPermissions =
-        runtimePermissions.filter { permission ->
-          runtimePermissionHandler.hasManifestDeclarations(context, listOf(permission))
-        }
-      return declaredLocationPermissions.ifEmpty { null }
+      val hasFineLocationDeclaration =
+        runtimePermissionHandler.hasManifestDeclarations(
+          context,
+          listOf(Manifest.permission.ACCESS_FINE_LOCATION),
+        )
+      val hasCoarseLocationDeclaration =
+        runtimePermissionHandler.hasManifestDeclarations(
+          context,
+          listOf(Manifest.permission.ACCESS_COARSE_LOCATION),
+        )
+
+      return when {
+        hasFineLocationDeclaration && hasCoarseLocationDeclaration ->
+          listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+          )
+        hasCoarseLocationDeclaration -> listOf(Manifest.permission.ACCESS_COARSE_LOCATION)
+        else -> null
+      }
     }
 
     return if (runtimePermissionHandler.hasManifestDeclarations(context, runtimePermissions)) {
