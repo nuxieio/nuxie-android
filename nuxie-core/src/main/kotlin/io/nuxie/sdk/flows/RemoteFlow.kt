@@ -313,6 +313,12 @@ sealed interface InteractionAction {
   )
 
   @Serializable
+  data class Goal(
+    val goalId: String,
+    val label: String? = null,
+  ) : InteractionAction
+
+  @Serializable
   data class SendEvent(
     val eventName: String,
     val properties: Map<String, JsonElement>? = null,
@@ -448,6 +454,7 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       "wait_until" -> input.json.decodeFromJsonElement(InteractionAction.WaitUntil.serializer(), el)
       "condition" -> input.json.decodeFromJsonElement(InteractionAction.Condition.serializer(), el)
       "experiment" -> input.json.decodeFromJsonElement(InteractionAction.Experiment.serializer(), el)
+      "goal" -> input.json.decodeFromJsonElement(InteractionAction.Goal.serializer(), el)
       "send_event" -> input.json.decodeFromJsonElement(InteractionAction.SendEvent.serializer(), el)
       "goal" -> {
         val goalId =
@@ -534,6 +541,10 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
           "variants",
           output.json.encodeToJsonElement(ListSerializer(InteractionAction.ExperimentVariant.serializer()), value.variants)
         )
+      }
+      is InteractionAction.Goal -> encodeWithType("goal") {
+        put("goalId", value.goalId)
+        if (value.label != null) put("label", value.label)
       }
       is InteractionAction.SendEvent -> encodeWithType("send_event") {
         put("eventName", value.eventName)

@@ -486,6 +486,11 @@ class FlowJourneyRunner(
           trackAction(action, context, error = null)
           result
         }
+        is InteractionAction.Goal -> {
+          handleGoal(action, context)
+          trackAction(action, context, error = null)
+          ActionResult.Continue
+        }
         is InteractionAction.SendEvent -> {
           handleSendEvent(action, context)
           trackAction(action, context, error = null)
@@ -859,6 +864,31 @@ class FlowJourneyRunner(
         eventName = action.eventName,
         eventProperties = props,
       )
+    )
+  }
+
+  private suspend fun handleGoal(action: InteractionAction.Goal, context: RuntimeTriggerContext) {
+    val goalId = action.goalId.trim()
+    if (goalId.isEmpty()) return
+
+    val properties = mutableMapOf<String, Any?>(
+      "journeyId" to journey.id,
+      "campaignId" to journey.campaignId,
+      "goalId" to goalId,
+    )
+    val resolvedScreen = context.screenId ?: journey.flowState.currentScreenId
+    if (!resolvedScreen.isNullOrBlank()) {
+      properties["screenId"] = resolvedScreen
+    }
+
+    val goalLabel = action.label?.trim().orEmpty()
+    if (goalLabel.isNotEmpty()) {
+      properties["goalLabel"] = goalLabel
+    }
+
+    eventService.track(
+      JourneyEvents.journeyGoalHit,
+      properties = properties,
     )
   }
 
@@ -1677,6 +1707,7 @@ private val InteractionAction.actionType: String
     is InteractionAction.WaitUntil -> "wait_until"
     is InteractionAction.Condition -> "condition"
     is InteractionAction.Experiment -> "experiment"
+    is InteractionAction.Goal -> "goal"
     is InteractionAction.SendEvent -> "send_event"
     is InteractionAction.Goal -> "goal"
     is InteractionAction.UpdateCustomer -> "update_customer"
