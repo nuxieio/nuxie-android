@@ -341,6 +341,64 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun explicitGoalAction_fallsBackToFullEvaluationWhenGoalFilterHasExtraPredicates() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Goal(goalId = "primary")),
+          enabled = true,
+        )
+      )
+    )
+    val explicitGoal = GoalConfig(
+      kind = GoalConfig.Kind.EVENT,
+      eventName = JourneyEvents.journeyGoalHit,
+      eventFilter = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.PredAnd(
+          listOf(
+            IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+            IRExpr.Pred("eq", "goal_id", IRExpr.String("primary")),
+            IRExpr.Pred("eq", "screen_id", IRExpr.String("screen_1")),
+          )
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = explicitGoal,
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_mismatch", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+      assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun completion_emitsJourneyUpdateToBroker() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.EveryTime)
     try {
