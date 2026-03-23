@@ -132,17 +132,23 @@ class EventService(
   }
 
   fun trackPreparedEvent(event: NuxieEvent) {
+    // Capture user-property side effects on the caller's current identity before
+    // the background enqueue can race with identify()/reset().
+    extractUserProperties(event)
     scope.launch {
-      enqueuePreparedEvent(event, persistToHistory = true)
+      enqueuePreparedEvent(event, persistToHistory = true, applyUserProperties = false)
     }
   }
 
   suspend fun enqueuePreparedEvent(
     event: NuxieEvent,
     persistToHistory: Boolean = true,
+    applyUserProperties: Boolean = true,
   ): Boolean {
     // Mirror iOS route(): user property extraction is driven by local events.
-    extractUserProperties(event)
+    if (applyUserProperties) {
+      extractUserProperties(event)
+    }
 
     // Store event locally (best-effort) for IR evaluation (segments/journeys).
     if (persistToHistory) {
