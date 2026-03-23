@@ -75,6 +75,14 @@ class JourneyServiceTest {
     private val remoteFlow: RemoteFlow,
     private val trackDelayMillis: Long = 0,
   ) : NuxieApiProtocol {
+    data class TrackedEvent(
+      val event: String,
+      val distinctId: String,
+      val properties: JsonObject?,
+    )
+
+    val trackedEvents: MutableList<TrackedEvent> = mutableListOf()
+
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
     override suspend fun trackEvent(
@@ -90,6 +98,11 @@ class JourneyServiceTest {
       if (trackDelayMillis > 0) {
         delay(trackDelayMillis)
       }
+      trackedEvents += TrackedEvent(
+        event = event,
+        distinctId = distinctId,
+        properties = properties,
+      )
       return EventResponse(status = "ok")
     }
 
@@ -907,6 +920,58 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_marksJourneyConvertedAndUsesStandardJourneyKeys() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_action", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.id, active.first().id)
+      assertNotNull(active.first().convertedAtEpochMillis)
+
+      val tracked = harness.api.trackedEvents.last { it.event == JourneyEvents.journeyGoalHit }
+      assertEquals("user_1", tracked.distinctId)
+      assertEquals(started.id, tracked.properties?.get("journey_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("camp_1", tracked.properties?.get("campaign_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("signup_complete", tracked.properties?.get("goal_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("screen_1", tracked.properties?.get("screen_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("Signed Up", tracked.properties?.get("goal_label")?.jsonPrimitive?.contentOrNull)
+      assertEquals(null, tracked.properties?.get("journeyId"))
+      assertEquals(null, tracked.properties?.get("campaignId"))
+      assertEquals(null, tracked.properties?.get("goalId"))
+      assertEquals(null, tracked.properties?.get("goalLabel"))
+
+      harness.service.handleRuntimeDismiss(started.id, CloseReason.UserDismissed)
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
@@ -1101,6 +1166,7 @@ class JourneyServiceTest {
   private data class Harness(
     val scope: CoroutineScope,
     val service: JourneyService,
+    val api: FakeApi,
     val eventService: EventService,
     val journeyStore: JourneyStore,
     val broker: DefaultTriggerBroker,
@@ -1241,6 +1307,7 @@ class JourneyServiceTest {
     return Harness(
       scope = scope,
       service = service,
+      api = api,
       eventService = eventService,
       journeyStore = journeyStore,
       broker = broker,

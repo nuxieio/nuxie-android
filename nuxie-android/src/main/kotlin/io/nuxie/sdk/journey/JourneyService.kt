@@ -617,6 +617,65 @@ class JourneyService(
     }
   }
 
+  internal suspend fun handleScopedGoalEvent(
+    journeyId: String,
+    goalId: String,
+    goalLabel: String?,
+    screenId: String?,
+  ) {
+    val journey = inMemoryJourneysById[journeyId] ?: return
+    val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
+    val properties = JourneyEvents.journeyGoalHitProperties(
+      journey = journey,
+      screenId = screenId,
+      goalId = goalId,
+      goalLabel = goalLabel,
+    )
+
+    val event = try {
+      eventService.prepareTriggerEvent(
+        event = JourneyEvents.journeyGoalHit,
+        properties = properties,
+      )
+    } catch (error: Throwable) {
+      NuxieLogger.warning(
+        "JourneyService: Failed to prepare scoped goal event: ${error.message}",
+        error,
+      )
+      return
+    }
+
+    scope.launch {
+      runCatching {
+        eventService.trackForTrigger(
+          JourneyEvents.journeyGoalHit,
+          properties = properties,
+          persistToHistory = false,
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning(
+          "JourneyService: Failed to track scoped goal event: ${error.message}",
+          error,
+        )
+      }
+    }
+
+    val transientEvent = storedEvent(event)
+
+    evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
+    if (!shouldDeferExitDecision(journey.id)) {
+      val exit = exitDecision(journey, campaign)
+      if (exit != null) {
+        completeJourney(journey, exit)
+        return
+      }
+    }
+
+    if (journey.status.isLive) {
+      persistJourney(journey)
+    }
+  }
+
   suspend fun resumeFromServerState(journeys: List<ActiveJourney>, campaigns: List<Campaign>) {
     for (active in journeys) {
       val existing = inMemoryJourneysById[active.sessionId]

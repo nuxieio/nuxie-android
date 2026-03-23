@@ -214,6 +214,7 @@ class FlowJourneyRunnerTest {
     val runner: FlowJourneyRunner,
     val host: FakeHost,
     val journey: Journey,
+    val eventService: EventService,
   ) {
     fun close() {
       scope.cancel()
@@ -461,6 +462,41 @@ class FlowJourneyRunnerTest {
         listOf("camera" to harness.journey.id),
         harness.host.requestPermissionRequests,
       )
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun goalActionTracksStandardJourneyPropertyKeys() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = " signup_complete ", label = " Signed Up "),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val goalEvent = harness.eventService.getEventsForUser("user_1", limit = 20)
+        .last { it.name == JourneyEvents.journeyGoalHit }
+      assertEquals(harness.journey.id, goalEvent.properties["journey_id"])
+      assertEquals("camp_1", goalEvent.properties["campaign_id"])
+      assertEquals("signup_complete", goalEvent.properties["goal_id"])
+      assertEquals("Signed Up", goalEvent.properties["goal_label"])
+      assertEquals(null, goalEvent.properties["journeyId"])
+      assertEquals(null, goalEvent.properties["campaignId"])
+      assertEquals(null, goalEvent.properties["goalId"])
+      assertEquals(null, goalEvent.properties["goalLabel"])
     } finally {
       harness.close()
     }
@@ -882,7 +918,13 @@ class FlowJourneyRunnerTest {
       nowEpochMillis = nowEpochMillis,
     )
 
-    return Harness(scope = scope, runner = runner, host = host, journey = journey)
+    return Harness(
+      scope = scope,
+      runner = runner,
+      host = host,
+      journey = journey,
+      eventService = eventService,
+    )
   }
 
   private fun buildFlow(interactions: Map<String, List<Interaction>>): RemoteFlow {
