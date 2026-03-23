@@ -202,6 +202,18 @@ class JourneyServiceTest {
     }
   }
 
+  private class SelectiveFailingInsertHistoryStore(
+    private val failingEventNames: Set<String>,
+    private val delegate: EventHistoryStore = InMemoryEventHistoryStore(),
+  ) : EventHistoryStore by delegate {
+    override suspend fun insert(event: StoredEvent) {
+      if (event.name in failingEventNames) {
+        throw IllegalStateException("history_insert_failed")
+      }
+      delegate.insert(event)
+    }
+  }
+
   @Test
   fun handleEventForTrigger_startsJourney() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.EveryTime)
@@ -1545,6 +1557,62 @@ class JourneyServiceTest {
       delay(80)
 
       assertNotNull(harness.service.getActiveJourneys("user_1").first().convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedGoalEvent_bufferParticipatesInLaterGoalReevaluationAfterHistoryInsertFails() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.ATTRIBUTE,
+        attributeExpr = IREnvelope(
+          irVersion = 1,
+          expr = IRExpr.And(
+            listOf(
+              IRExpr.EventsExists(
+                name = JourneyEvents.journeyGoalHit,
+                whereExpr = IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+              ),
+              IRExpr.EventsExists(name = "purchase_complete"),
+            ),
+          ),
+        ),
+      ),
+      exitPolicy = null,
+      historyStore = SelectiveFailingInsertHistoryStore(
+        failingEventNames = setOf(JourneyEvents.journeyGoalHit),
+      ),
+      presentFlowResult = false,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_buffer_later_eval", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = null,
+        screenId = "screen_1",
+      )
+      delay(80)
+      assertEquals(null, harness.service.getActiveJourneys("user_1").first().convertedAtEpochMillis)
+
+      val purchaseEvent = harness.eventService.trackForTrigger(
+        event = "purchase_complete",
+        persistToHistory = true,
+      ).first
+      harness.service.handleEventForTrigger(purchaseEvent)
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertNotNull(active.first().convertedAtEpochMillis)
     } finally {
       harness.close()
     }

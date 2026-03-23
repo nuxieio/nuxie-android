@@ -570,6 +570,41 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun goalActionSkipsBlankGoalIdWithoutDefaultingToPrimary() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_blank",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "   ", label = "Ignored"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var goalHits = 0
+    val harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        goalHits += 1
+        GoalActionResolution()
+      },
+    )
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val trackedNames = harness.eventService.getEventsForUser("user_1", limit = 20).map { it.name }
+      assertTrue(trackedNames.none { it == JourneyEvents.journeyGoalHit })
+      assertEquals(0, goalHits)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun goalActionStopsExecutingAfterJourneyCompletes() = runBlocking {
     val interactions = mapOf(
       "__global__" to listOf(

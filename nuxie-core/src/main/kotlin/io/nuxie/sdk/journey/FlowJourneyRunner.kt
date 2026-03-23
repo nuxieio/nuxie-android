@@ -1330,7 +1330,11 @@ class FlowJourneyRunner(
     action: InteractionAction.Goal,
     context: RuntimeTriggerContext,
   ): ActionResult {
-    val goalId = action.goalId.trim().ifEmpty { "primary" }
+    val goalId = action.goalId.trim()
+    if (goalId.isBlank()) {
+      NuxieLogger.warning("FlowJourneyRunner: Skipping goal action with blank goalId")
+      return ActionResult.Continue
+    }
     val goalLabel = action.label?.trim()?.takeIf { it.isNotEmpty() }
     val goalEvent = runCatching {
       eventService.prepareTriggerEvent(

@@ -1129,7 +1129,10 @@ class JourneyService(
     if (journey.convertedAtEpochMillis != null) return
     if (journey.goalSnapshot == null) return
 
-    val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = transientEvents)
+    val mergedTransientEvents = (scopedGoalEvents(journey) + transientEvents)
+      .distinctBy { it.id }
+      .sortedBy { it.timestampEpochMillis }
+    val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = mergedTransientEvents)
     if (result.met && result.atEpochMillis != null) {
       val metAt = result.atEpochMillis ?: return
       latchGoalConversion(journey, metAt)
