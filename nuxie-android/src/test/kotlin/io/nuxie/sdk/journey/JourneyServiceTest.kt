@@ -920,7 +920,7 @@ class JourneyServiceTest {
   }
 
   @Test
-  fun scopedGoalEvent_marksJourneyConvertedAndUsesStandardJourneyKeys() = runBlocking {
+  fun scopedGoalEvent_completesPresentedJourneyAndUsesStandardJourneyKeys() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
       goal = GoalConfig(
@@ -944,10 +944,8 @@ class JourneyServiceTest {
       )
       delay(80)
 
-      val active = harness.service.getActiveJourneys("user_1")
-      assertEquals(1, active.size)
-      assertEquals(started.id, active.first().id)
-      assertNotNull(active.first().convertedAtEpochMillis)
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
 
       val tracked = harness.api.trackedEvents.last { it.event == JourneyEvents.journeyGoalHit }
       assertEquals("user_1", tracked.distinctId)
@@ -960,12 +958,6 @@ class JourneyServiceTest {
       assertEquals(null, tracked.properties?.get("campaignId"))
       assertEquals(null, tracked.properties?.get("goalId"))
       assertEquals(null, tracked.properties?.get("goalLabel"))
-
-      harness.service.handleRuntimeDismiss(started.id, CloseReason.UserDismissed)
-      delay(80)
-
-      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
-      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
     } finally {
       harness.close()
     }

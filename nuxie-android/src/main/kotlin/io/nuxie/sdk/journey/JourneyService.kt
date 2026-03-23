@@ -601,6 +601,10 @@ class JourneyService(
         val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
         handleOutcome(outcome, journey)
       }
+      if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+        completeJourney(journey, JourneyExitReason.GOAL_MET)
+        return
+      }
       if (journey.status.isLive) {
         persistJourney(journey)
       }
@@ -611,6 +615,10 @@ class JourneyService(
     if (runner != null) {
       val outcome = runner.dispatchEventTrigger(event)
       handleOutcome(outcome, journey)
+    }
+    if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+      completeJourney(journey, JourneyExitReason.GOAL_MET)
+      return
     }
     if (journey.status.isLive) {
       persistJourney(journey)
@@ -678,6 +686,10 @@ class JourneyService(
         val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
         handleOutcome(outcome, journey)
       }
+      if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+        completeJourney(journey, JourneyExitReason.GOAL_MET)
+        return
+      }
       if (journey.status.isLive) {
         persistJourney(journey)
       }
@@ -688,6 +700,10 @@ class JourneyService(
     if (runner != null) {
       val outcome = runner.dispatchEventTrigger(event)
       handleOutcome(outcome, journey)
+    }
+    if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+      completeJourney(journey, JourneyExitReason.GOAL_MET)
+      return
     }
     if (journey.status.isLive) {
       persistJourney(journey)
@@ -1302,6 +1318,13 @@ class JourneyService(
 
   private fun shouldDeferExitDecision(journeyId: String): Boolean {
     return presentedJourneyIds.contains(journeyId)
+  }
+
+  private suspend fun shouldCompletePresentedScopedGoalJourney(journey: Journey, campaign: Campaign): Boolean {
+    if (!journey.status.isLive) return false
+    if (journey.convertedAtEpochMillis == null) return false
+    if (!shouldDeferExitDecision(journey.id)) return false
+    return exitDecision(journey, campaign) == JourneyExitReason.GOAL_MET
   }
 
   private fun storedEvent(event: NuxieEvent): StoredEvent {
