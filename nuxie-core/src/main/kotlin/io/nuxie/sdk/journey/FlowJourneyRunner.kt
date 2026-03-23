@@ -1349,7 +1349,7 @@ class FlowJourneyRunner(
     }.onFailure {
       // If the synchronous trigger send fails, fall back to the normal queued path so the
       // backend can still observe the goal hit that caused any immediate conversion.
-      eventService.trackPreparedEvent(goalEvent)
+      eventService.enqueuePreparedEvent(goalEvent, persistToHistory = false)
     }
     val resolution = onGoalActionHit(goalEvent)
     return when {

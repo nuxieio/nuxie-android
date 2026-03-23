@@ -7,8 +7,10 @@ import io.nuxie.sdk.campaigns.EventTriggerConfig
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
+import io.nuxie.sdk.events.queue.EventQueueStore
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
+import io.nuxie.sdk.events.queue.QueuedEvent
 import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.features.FeatureAccess
 import io.nuxie.sdk.features.FeatureCheckResult
@@ -69,6 +71,7 @@ class FlowJourneyRunnerTest {
       EventResponse(status = "ok")
     }
     val batchCalls = mutableListOf<List<String>>()
+    val callLog = mutableListOf<String>()
 
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = ProfileResponse()
 
@@ -82,11 +85,13 @@ class FlowJourneyRunnerTest {
       entityId: String?,
       timestamp: String,
     ): EventResponse {
+      callLog += "track:$event"
       return trackResponder(event, properties)
     }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
       batchCalls += batch.batch.map { it.event }
+      callLog += batch.batch.map { "batch:${it.event}" }
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
     }
 
@@ -140,6 +145,35 @@ class FlowJourneyRunnerTest {
     override suspend fun handleUserChange(fromOldDistinctId: String, toNewDistinctId: String) {}
     override suspend fun syncFeatureInfo() {}
     override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {}
+  }
+
+  private class DelayingEventQueueStore(
+    private val delegate: EventQueueStore = InMemoryEventQueueStore(),
+    private val delayedEventNames: Set<String>,
+    private val delayMillis: Long,
+  ) : EventQueueStore {
+    override suspend fun enqueue(event: QueuedEvent): Boolean {
+      if (event.name in delayedEventNames) {
+        delay(delayMillis)
+      }
+      return delegate.enqueue(event)
+    }
+
+    override suspend fun size(): Int = delegate.size()
+
+    override suspend fun peek(limit: Int): List<QueuedEvent> = delegate.peek(limit)
+
+    override suspend fun delete(ids: List<String>) {
+      delegate.delete(ids)
+    }
+
+    override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+      return delegate.reassignDistinctId(fromDistinctId, toDistinctId)
+    }
+
+    override suspend fun clear() {
+      delegate.clear()
+    }
   }
 
   private class FakeProfileService(
@@ -681,6 +715,65 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun goalActionFlushesQueuedFallbackBeforeFollowUpTriggerSends() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_fallback_ordering",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      queueStore = DelayingEventQueueStore(
+        delayedEventNames = setOf(JourneyEvents.journeyGoalHit),
+        delayMillis = 75,
+      ),
+      onGoalActionHit = { _ ->
+        harness!!.api.callLog += "callback:start"
+        harness!!.eventService.trackForTrigger(
+          event = "after_goal",
+          properties = mapOf("journey_id" to harness!!.journey.id),
+        )
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      val goalHitAttemptIndex = harness!!.api.callLog.indexOf("track:${JourneyEvents.journeyGoalHit}")
+      val callbackIndex = harness!!.api.callLog.indexOf("callback:start")
+      val goalHitBatchIndex = harness!!.api.callLog.indexOf("batch:${JourneyEvents.journeyGoalHit}")
+      val followUpTrackIndex = harness!!.api.callLog.indexOf("track:after_goal")
+
+      assertTrue(goalHitAttemptIndex >= 0)
+      assertTrue(callbackIndex >= 0)
+      assertTrue(goalHitBatchIndex >= 0)
+      assertTrue(followUpTrackIndex >= 0)
+      assertTrue(goalHitAttemptIndex < callbackIndex)
+      assertTrue(callbackIndex < goalHitBatchIndex)
+      assertTrue(goalHitBatchIndex < followUpTrackIndex)
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
   fun delayActionPausesAndResumes() = runBlocking {
     val interactions = mapOf(
       "screen_1" to listOf(
@@ -1007,6 +1100,7 @@ class FlowJourneyRunnerTest {
 
   private fun newHarness(
     interactions: Map<String, List<Interaction>>,
+    queueStore: EventQueueStore = InMemoryEventQueueStore(),
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     onGoalActionHit: suspend (goalEvent: NuxieEvent) -> GoalActionResolution = { GoalActionResolution() },
   ): Harness {
@@ -1017,7 +1111,6 @@ class FlowJourneyRunnerTest {
 
     val session = io.nuxie.sdk.session.DefaultSessionService()
     val config = NuxieConfiguration(apiKey = "test_key")
-    val queueStore = InMemoryEventQueueStore()
     val historyStore = InMemoryEventHistoryStore()
     val networkQueue = NuxieNetworkQueue(
       store = queueStore,

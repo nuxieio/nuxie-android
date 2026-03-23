@@ -132,11 +132,20 @@ class EventService(
   }
 
   fun trackPreparedEvent(event: NuxieEvent) {
+    scope.launch {
+      enqueuePreparedEvent(event, persistToHistory = true)
+    }
+  }
+
+  suspend fun enqueuePreparedEvent(
+    event: NuxieEvent,
+    persistToHistory: Boolean = true,
+  ): Boolean {
     // Mirror iOS route(): user property extraction is driven by local events.
     extractUserProperties(event)
 
     // Store event locally (best-effort) for IR evaluation (segments/journeys).
-    scope.launch {
+    if (persistToHistory) {
       runCatching { historyStore.insert(storedEvent(event)) }
     }
 
@@ -154,12 +163,11 @@ class EventService(
       entityId = event.properties["entityId"] as? String,
     )
 
-    scope.launch {
-      val ok = networkQueue.enqueue(queued)
-      if (!ok) {
-        NuxieLogger.warning("Dropped event due to queue limits: ${queued.name}")
-      }
+    val ok = networkQueue.enqueue(queued)
+    if (!ok) {
+      NuxieLogger.warning("Dropped event due to queue limits: ${queued.name}")
     }
+    return ok
   }
 
   suspend fun flushEvents(): Boolean = networkQueue.flush(forceSend = true)
