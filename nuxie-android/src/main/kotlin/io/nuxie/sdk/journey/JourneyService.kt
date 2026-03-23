@@ -534,6 +534,10 @@ class JourneyService(
         val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
         handleOutcome(outcome, journey)
       }
+      if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+        completeJourney(journey, JourneyExitReason.GOAL_MET)
+        return
+      }
       if (journey.status.isLive) {
         persistJourney(journey)
       }
@@ -544,6 +548,10 @@ class JourneyService(
     if (runner != null) {
       val outcome = runner.dispatchEventTrigger(event)
       handleOutcome(outcome, journey)
+    }
+    if (shouldCompletePresentedScopedGoalJourney(journey, campaign)) {
+      completeJourney(journey, JourneyExitReason.GOAL_MET)
+      return
     }
     if (journey.status.isLive) {
       persistJourney(journey)
@@ -643,7 +651,20 @@ class JourneyService(
       goalLabel = goalLabel,
     )
 
-    val event = try {
+    val tracked = runCatching {
+      eventService.trackForTrigger(
+        JourneyEvents.journeyGoalHit,
+        properties = properties,
+        persistToHistory = true,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning(
+        "JourneyService: Failed to track scoped goal event: ${error.message}",
+        error,
+      )
+    }.getOrNull()
+
+    val event = tracked?.first ?: try {
       eventService.prepareTriggerEvent(
         event = JourneyEvents.journeyGoalHit,
         properties = properties,
@@ -655,23 +676,9 @@ class JourneyService(
       )
       return
     }
+    val transientEvents = if (tracked != null) emptyList() else listOf(storedEvent(event))
 
-    runCatching {
-      eventService.trackForTrigger(
-        JourneyEvents.journeyGoalHit,
-        properties = properties,
-        persistToHistory = true,
-      )
-    }.onFailure { error ->
-      NuxieLogger.warning(
-        "JourneyService: Failed to track scoped goal event: ${error.message}",
-        error,
-      )
-    }
-
-    val transientEvent = storedEvent(event)
-
-    evaluateGoalIfNeeded(journey, campaign, transientEvents = listOf(transientEvent))
+    evaluateGoalIfNeeded(journey, campaign, transientEvents = transientEvents)
     if (!shouldDeferExitDecision(journey.id)) {
       val exit = exitDecision(journey, campaign)
       if (exit != null) {

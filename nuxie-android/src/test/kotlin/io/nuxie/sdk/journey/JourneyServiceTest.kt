@@ -1285,6 +1285,49 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_doesNotDoubleCountSingleGoalHitDuringImmediateEvaluation() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.ATTRIBUTE,
+        attributeExpr = IREnvelope(
+          irVersion = 1,
+          expr = IRExpr.Compare(
+            op = ">",
+            left = IRExpr.EventsCount(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+            ),
+            right = IRExpr.Number(1.0),
+          ),
+        ),
+      ),
+      exitPolicy = null,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_single", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
@@ -1357,6 +1400,47 @@ class JourneyServiceTest {
       assertEquals(started.id, active.first().id)
       assertEquals(null, active.first().convertedAtEpochMillis)
       assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedNotificationPermissionEvent_completesPresentedJourneyAfterGoalAction() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = mapOf(
+        "__global__" to listOf(
+          Interaction(
+            id = "notification_goal",
+            trigger = InteractionTrigger.Event(eventName = SystemEventNames.notificationsEnabled),
+            actions = listOf(InteractionAction.Goal(goalId = "signup_complete")),
+            enabled = true,
+          )
+        )
+      ),
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_scope_notification_goal", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedNotificationPermissionEvent(
+        journeyId = started.id,
+        eventName = SystemEventNames.notificationsEnabled,
+        properties = mapOf("journey_id" to started.id),
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
     } finally {
       harness.close()
     }
