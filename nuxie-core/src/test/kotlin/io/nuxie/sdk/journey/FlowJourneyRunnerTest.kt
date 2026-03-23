@@ -212,6 +212,7 @@ class FlowJourneyRunnerTest {
 
   private data class Harness(
     val scope: CoroutineScope,
+    val api: FakeApi,
     val runner: FlowJourneyRunner,
     val host: FakeHost,
     val journey: Journey,
@@ -534,6 +535,55 @@ class FlowJourneyRunnerTest {
 
       val trackedNames = activeHarness.eventService.getEventsForUser("user_1", limit = 20).map { it.name }
       assertTrue(trackedNames.none { it == "should_not_run" })
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionTracksGoalHitBeforeSynchronousFollowUpTriggerSends() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_ordering",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    val apiCalls = mutableListOf<String>()
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        apiCalls += "callback:start"
+        harness!!.eventService.trackForTrigger(
+          event = "after_goal",
+          properties = mapOf("journey_id" to harness!!.journey.id),
+        )
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      apiCalls += "track:$event"
+      EventResponse(status = "ok")
+    }
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      assertEquals(
+        listOf(
+          "track:${JourneyEvents.journeyGoalHit}",
+          "callback:start",
+          "track:after_goal",
+        ),
+        apiCalls,
+      )
     } finally {
       harness?.close()
     }
@@ -959,6 +1009,7 @@ class FlowJourneyRunnerTest {
 
     return Harness(
       scope = scope,
+      api = api,
       runner = runner,
       host = host,
       journey = journey,

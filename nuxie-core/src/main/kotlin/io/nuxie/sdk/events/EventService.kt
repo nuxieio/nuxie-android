@@ -200,8 +200,6 @@ class EventService(
       throw IllegalArgumentException("Event name cannot be empty")
     }
 
-    // Ensure any queued events are delivered first so the trigger call observes a consistent order.
-    runCatching { networkQueue.flush(forceSend = true) }
     val finalEvent = prepareTriggerEvent(
       event = event,
       properties = properties,
@@ -221,6 +219,10 @@ class EventService(
     event: NuxieEvent,
     persistToHistory: Boolean = true,
   ): Pair<NuxieEvent, EventResponse> {
+    // Ensure any queued events are delivered first so direct trigger sends preserve
+    // the same server-side ordering guarantees as trackForTrigger(...).
+    runCatching { networkQueue.flush(forceSend = true) }
+
     // Store event locally (best-effort) before trigger evaluation continues when the
     // event should participate in shared user event history.
     if (persistToHistory) {

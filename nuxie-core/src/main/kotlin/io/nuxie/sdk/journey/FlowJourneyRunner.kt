@@ -1344,8 +1344,10 @@ class FlowJourneyRunner(
       )
     }.getOrNull() ?: return ActionResult.Continue
 
-    eventService.trackPreparedEvent(goalEvent)
-    val resolution = onGoalActionHit(goalEvent)
+    val trackedGoalEvent = runCatching {
+      eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true).first
+    }.getOrElse { goalEvent }
+    val resolution = onGoalActionHit(trackedGoalEvent)
     return when {
       resolution.shouldExit -> ActionResult.Exit(JourneyExitReason.GOAL_MET)
       !journey.status.isLive -> ActionResult.StopSequence
