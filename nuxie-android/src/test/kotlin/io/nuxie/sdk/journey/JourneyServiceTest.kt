@@ -83,6 +83,18 @@ class JourneyServiceTest {
 
     val trackedEvents: MutableList<TrackedEvent> = mutableListOf()
 
+    private fun recordTrackedEvent(
+      event: String,
+      distinctId: String,
+      properties: JsonObject?,
+    ) {
+      trackedEvents += TrackedEvent(
+        event = event,
+        distinctId = distinctId,
+        properties = properties,
+      )
+    }
+
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
     override suspend fun trackEvent(
@@ -98,15 +110,18 @@ class JourneyServiceTest {
       if (trackDelayMillis > 0) {
         delay(trackDelayMillis)
       }
-      trackedEvents += TrackedEvent(
-        event = event,
-        distinctId = distinctId,
-        properties = properties,
-      )
+      recordTrackedEvent(event = event, distinctId = distinctId, properties = properties)
       return EventResponse(status = "ok")
     }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
+      batch.batch.forEach { item ->
+        recordTrackedEvent(
+          event = item.event,
+          distinctId = item.distinctId,
+          properties = item.properties,
+        )
+      }
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
     }
 
@@ -393,6 +408,66 @@ class JourneyServiceTest {
       assertEquals(started.journey.id, active.first().id)
       assertEquals(null, active.first().convertedAtEpochMillis)
       assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun explicitGoalAction_fallbackReevaluationIncludesPriorGoalHits() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete"),
+            InteractionAction.Goal(goalId = "profile_complete"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val compositeGoal = GoalConfig(
+      kind = GoalConfig.Kind.ATTRIBUTE,
+      attributeExpr = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.Compare(
+          op = ">",
+          left = IRExpr.EventsCount(
+            name = JourneyEvents.journeyGoalHit,
+            whereExpr = IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+          ),
+          right = IRExpr.Number(1.0),
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = compositeGoal,
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_count", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertNotNull(active.first().convertedAtEpochMillis)
     } finally {
       harness.close()
     }
@@ -1162,6 +1237,48 @@ class JourneyServiceTest {
 
       val afterSecond = harness.service.getActiveJourneys("user_1").first()
       assertNotNull(afterSecond.convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedGoalEvent_tracksGoalHitBeforeCompletionEvents() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+      trackDelayMillis = 750,
+      presentFlowResult = false,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_order", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+      harness.eventService.flushEvents()
+      delay(80)
+
+      val trackedEvents = harness.api.trackedEvents.map { it.event }
+      val goalHitIndex = trackedEvents.indexOf(JourneyEvents.journeyGoalHit)
+      val goalMetIndex = trackedEvents.indexOf(JourneyEvents.journeyGoalMet)
+      val completedIndex = trackedEvents.indexOf("\$journey_completed")
+
+      assertTrue(goalHitIndex >= 0)
+      assertTrue(goalMetIndex > goalHitIndex)
+      assertTrue(completedIndex > goalHitIndex)
     } finally {
       harness.close()
     }

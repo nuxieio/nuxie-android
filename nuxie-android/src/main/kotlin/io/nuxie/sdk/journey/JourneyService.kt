@@ -39,6 +39,7 @@ import io.nuxie.sdk.triggers.TriggerBroker
 import io.nuxie.sdk.triggers.TriggerUpdate
 import io.nuxie.sdk.util.fromJsonElement
 import io.nuxie.sdk.util.Iso8601
+import io.nuxie.sdk.util.toJsonObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -119,6 +120,8 @@ class JourneyService(
 ) {
   companion object {
     private const val EXPLICIT_GOAL_HITS_CONTEXT_KEY = "__explicit_goal_hits"
+    private const val EXPLICIT_GOAL_EVENTS_CONTEXT_KEY = "__explicit_goal_events"
+    private const val MAX_EXPLICIT_GOAL_EVENTS = 32
   }
 
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
@@ -653,19 +656,17 @@ class JourneyService(
       return
     }
 
-    scope.launch {
-      runCatching {
-        eventService.trackForTrigger(
-          JourneyEvents.journeyGoalHit,
-          properties = properties,
-          persistToHistory = true,
-        )
-      }.onFailure { error ->
-        NuxieLogger.warning(
-          "JourneyService: Failed to track scoped goal event: ${error.message}",
-          error,
-        )
-      }
+    runCatching {
+      eventService.trackForTrigger(
+        JourneyEvents.journeyGoalHit,
+        properties = properties,
+        persistToHistory = true,
+      )
+    }.onFailure { error ->
+      NuxieLogger.warning(
+        "JourneyService: Failed to track scoped goal event: ${error.message}",
+        error,
+      )
     }
 
     val transientEvent = storedEvent(event)
@@ -1099,10 +1100,12 @@ class JourneyService(
   ): GoalActionResolution {
     val goalId = explicitGoalIdForJourney(journey, goalEvent) ?: return GoalActionResolution()
     val hitAtEpochMillis = nowEpochMillis()
+    val storedGoalEvent = storedEvent(goalEvent)
     val didRecordHit = recordExplicitGoalHit(journey, goalId, hitAtEpochMillis)
+    val didRecordGoalEvent = recordExplicitGoalEvent(journey, storedGoalEvent)
 
     if (journey.convertedAtEpochMillis != null) {
-      if (didRecordHit) {
+      if (didRecordHit || didRecordGoalEvent) {
         persistJourney(journey)
       }
       return GoalActionResolution(shouldExit = shouldExitImmediatelyOnGoal(journey))
@@ -1116,7 +1119,7 @@ class JourneyService(
             goalEvaluator.isGoalMet(
               journey,
               campaign,
-              transientEvents = listOf(storedEvent(goalEvent)),
+              transientEvents = explicitGoalTransientEvents(journey, storedGoalEvent),
             )
           if (result.met) {
             result.atEpochMillis ?: hitAtEpochMillis
@@ -1157,7 +1160,7 @@ class JourneyService(
       }
 
     if (metAtEpochMillis == null) {
-      if (didRecordHit) {
+      if (didRecordHit || didRecordGoalEvent) {
         persistJourney(journey)
       }
       return GoalActionResolution()
@@ -1219,6 +1222,20 @@ class JourneyService(
     }.toMap()
   }
 
+  private fun explicitGoalEvents(journey: Journey): List<StoredEvent> {
+    val raw = journey.getContext(EXPLICIT_GOAL_EVENTS_CONTEXT_KEY) as? JsonArray ?: return emptyList()
+    return raw.mapNotNull(::explicitGoalEventFromJson)
+  }
+
+  private fun explicitGoalTransientEvents(
+    journey: Journey,
+    currentEvent: StoredEvent,
+  ): List<StoredEvent> {
+    return (explicitGoalEvents(journey) + currentEvent)
+      .distinctBy { it.id }
+      .sortedBy { it.timestampEpochMillis }
+  }
+
   private fun recordExplicitGoalHit(
     journey: Journey,
     goalId: String,
@@ -1234,6 +1251,57 @@ class JourneyService(
       nowEpochMillis(),
     )
     return true
+  }
+
+  private fun recordExplicitGoalEvent(
+    journey: Journey,
+    event: StoredEvent,
+  ): Boolean {
+    val existing = explicitGoalEvents(journey).toMutableList()
+    if (existing.any { it.id == event.id }) return false
+
+    existing += event
+    val trimmed = existing.sortedBy { it.timestampEpochMillis }.takeLast(MAX_EXPLICIT_GOAL_EVENTS)
+    journey.setContextJson(
+      EXPLICIT_GOAL_EVENTS_CONTEXT_KEY,
+      JsonArray(trimmed.map(::explicitGoalEventJson)),
+      nowEpochMillis(),
+    )
+    return true
+  }
+
+  private fun explicitGoalEventJson(event: StoredEvent): JsonObject {
+    return JsonObject(
+      mapOf(
+        "id" to JsonPrimitive(event.id),
+        "name" to JsonPrimitive(event.name),
+        "distinct_id" to JsonPrimitive(event.distinctId),
+        "timestamp_epoch_millis" to JsonPrimitive(event.timestampEpochMillis),
+        "properties" to toJsonObject(event.properties),
+      ),
+    )
+  }
+
+  private fun explicitGoalEventFromJson(value: JsonElement): StoredEvent? {
+    val json = value as? JsonObject ?: return null
+    val id = json["id"]?.jsonPrimitive?.contentOrNull ?: return null
+    val name = json["name"]?.jsonPrimitive?.contentOrNull ?: return null
+    val distinctId = json["distinct_id"]?.jsonPrimitive?.contentOrNull ?: return null
+    val timestampEpochMillis =
+      json["timestamp_epoch_millis"]?.jsonPrimitive?.longOrNull
+        ?: json["timestamp_epoch_millis"]?.jsonPrimitive?.doubleOrNull?.toLong()
+        ?: json["timestamp_epoch_millis"]?.jsonPrimitive?.intOrNull?.toLong()
+        ?: return null
+    val properties =
+      json["properties"]?.jsonObject?.mapValues { (_, element) -> fromJsonElement(element) }
+        ?: emptyMap()
+    return StoredEvent(
+      id = id,
+      name = name,
+      distinctId = distinctId,
+      timestampEpochMillis = timestampEpochMillis,
+      properties = properties,
+    )
   }
 
   private fun explicitGoalIdForJourney(journey: Journey, goalEvent: NuxieEvent): String? {
