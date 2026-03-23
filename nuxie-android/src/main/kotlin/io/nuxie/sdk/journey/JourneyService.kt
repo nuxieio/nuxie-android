@@ -121,7 +121,9 @@ class JourneyService(
   companion object {
     private const val EXPLICIT_GOAL_HITS_CONTEXT_KEY = "__explicit_goal_hits"
     private const val EXPLICIT_GOAL_EVENTS_CONTEXT_KEY = "__explicit_goal_events"
+    private const val SCOPED_GOAL_EVENTS_CONTEXT_KEY = "__scoped_goal_events"
     private const val MAX_EXPLICIT_GOAL_EVENTS = 32
+    private const val MAX_SCOPED_GOAL_EVENTS = 32
   }
 
   private val inMemoryJourneysById: MutableMap<String, Journey> = mutableMapOf()
@@ -708,7 +710,9 @@ class JourneyService(
     }
 
     val event = tracked?.first ?: preparedEvent
-    val transientEvents = listOf(storedEvent(preparedEvent))
+    val storedPreparedEvent = storedEvent(preparedEvent)
+    recordScopedGoalEvent(journey, storedPreparedEvent)
+    val transientEvents = scopedGoalTransientEvents(journey, storedPreparedEvent)
 
     evaluateGoalIfNeeded(journey, campaign, transientEvents = transientEvents)
     if (!shouldDeferExitDecision(journey.id)) {
@@ -1272,8 +1276,11 @@ class JourneyService(
   }
 
   private fun explicitGoalEvents(journey: Journey): List<StoredEvent> {
-    val raw = journey.getContext(EXPLICIT_GOAL_EVENTS_CONTEXT_KEY) as? JsonArray ?: return emptyList()
-    return raw.mapNotNull(::explicitGoalEventFromJson)
+    return contextStoredEvents(journey, EXPLICIT_GOAL_EVENTS_CONTEXT_KEY)
+  }
+
+  private fun scopedGoalEvents(journey: Journey): List<StoredEvent> {
+    return contextStoredEvents(journey, SCOPED_GOAL_EVENTS_CONTEXT_KEY)
   }
 
   private fun explicitGoalTransientEvents(
@@ -1281,6 +1288,15 @@ class JourneyService(
     currentEvent: StoredEvent,
   ): List<StoredEvent> {
     return (explicitGoalEvents(journey) + currentEvent)
+      .distinctBy { it.id }
+      .sortedBy { it.timestampEpochMillis }
+  }
+
+  private fun scopedGoalTransientEvents(
+    journey: Journey,
+    currentEvent: StoredEvent,
+  ): List<StoredEvent> {
+    return (scopedGoalEvents(journey) + currentEvent)
       .distinctBy { it.id }
       .sortedBy { it.timestampEpochMillis }
   }
@@ -1306,13 +1322,47 @@ class JourneyService(
     journey: Journey,
     event: StoredEvent,
   ): Boolean {
-    val existing = explicitGoalEvents(journey).toMutableList()
+    return recordContextStoredEvent(
+      journey = journey,
+      key = EXPLICIT_GOAL_EVENTS_CONTEXT_KEY,
+      event = event,
+      maxEvents = MAX_EXPLICIT_GOAL_EVENTS,
+    )
+  }
+
+  private fun recordScopedGoalEvent(
+    journey: Journey,
+    event: StoredEvent,
+  ): Boolean {
+    return recordContextStoredEvent(
+      journey = journey,
+      key = SCOPED_GOAL_EVENTS_CONTEXT_KEY,
+      event = event,
+      maxEvents = MAX_SCOPED_GOAL_EVENTS,
+    )
+  }
+
+  private fun contextStoredEvents(
+    journey: Journey,
+    key: String,
+  ): List<StoredEvent> {
+    val raw = journey.getContext(key) as? JsonArray ?: return emptyList()
+    return raw.mapNotNull(::explicitGoalEventFromJson)
+  }
+
+  private fun recordContextStoredEvent(
+    journey: Journey,
+    key: String,
+    event: StoredEvent,
+    maxEvents: Int,
+  ): Boolean {
+    val existing = contextStoredEvents(journey, key).toMutableList()
     if (existing.any { it.id == event.id }) return false
 
     existing += event
-    val trimmed = existing.sortedBy { it.timestampEpochMillis }.takeLast(MAX_EXPLICIT_GOAL_EVENTS)
+    val trimmed = existing.sortedBy { it.timestampEpochMillis }.takeLast(maxEvents)
     journey.setContextJson(
-      EXPLICIT_GOAL_EVENTS_CONTEXT_KEY,
+      key,
       JsonArray(trimmed.map(::explicitGoalEventJson)),
       nowEpochMillis(),
     )

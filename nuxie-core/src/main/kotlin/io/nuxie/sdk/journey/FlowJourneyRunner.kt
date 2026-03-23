@@ -21,6 +21,7 @@ import io.nuxie.sdk.ir.IRUserProps
 import io.nuxie.sdk.network.models.ExperimentAssignment
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
+import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.triggers.JourneyExitReason
 import io.nuxie.sdk.util.fromJsonElement
 import io.nuxie.sdk.util.toJsonElement
@@ -1346,10 +1347,21 @@ class FlowJourneyRunner(
 
     runCatching {
       eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true)
-    }.onFailure {
+    }.onFailure { error ->
       // If the synchronous trigger send fails, fall back to the normal queued path so the
       // backend can still observe the goal hit that caused any immediate conversion.
-      eventService.enqueuePreparedEvent(goalEvent, persistToHistory = false)
+      runCatching {
+        eventService.enqueuePreparedEvent(goalEvent, persistToHistory = false)
+      }.onFailure { fallbackError ->
+        NuxieLogger.warning(
+          "FlowJourneyRunner: Failed to requeue goal event after direct send failure: ${fallbackError.message}",
+          fallbackError,
+        )
+      }
+      NuxieLogger.warning(
+        "FlowJourneyRunner: Failed to track goal event directly: ${error.message}",
+        error,
+      )
     }
     val resolution = onGoalActionHit(goalEvent)
     return when {

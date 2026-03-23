@@ -176,6 +176,35 @@ class FlowJourneyRunnerTest {
     }
   }
 
+  private class ThrowingEventQueueStore(
+    private val delegate: EventQueueStore = InMemoryEventQueueStore(),
+    private val throwingEventNames: Set<String>,
+    private val failure: Throwable = IllegalStateException("queue_failed"),
+  ) : EventQueueStore {
+    override suspend fun enqueue(event: QueuedEvent): Boolean {
+      if (event.name in throwingEventNames) {
+        throw failure
+      }
+      return delegate.enqueue(event)
+    }
+
+    override suspend fun size(): Int = delegate.size()
+
+    override suspend fun peek(limit: Int): List<QueuedEvent> = delegate.peek(limit)
+
+    override suspend fun delete(ids: List<String>) {
+      delegate.delete(ids)
+    }
+
+    override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+      return delegate.reassignDistinctId(fromDistinctId, toDistinctId)
+    }
+
+    override suspend fun clear() {
+      delegate.clear()
+    }
+  }
+
   private class FakeProfileService(
     private var profile: ProfileResponse = ProfileResponse(),
   ) : ProfileService {
@@ -709,6 +738,51 @@ class FlowJourneyRunnerTest {
       assertNotNull(historyGoalEvent)
       assertEquals(historyGoalEvent!!.id, goalEventId)
       assertTrue(goalEventId != "server_goal_event")
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionStillEvaluatesWhenFallbackQueueingThrows() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_queue_throw",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    var didHandleGoal = false
+    harness = newHarness(
+      interactions = interactions,
+      queueStore = ThrowingEventQueueStore(
+        throwingEventNames = setOf(JourneyEvents.journeyGoalHit),
+      ),
+      onGoalActionHit = {
+        didHandleGoal = true
+        harness!!.journey.complete(JourneyExitReason.GOAL_MET)
+        GoalActionResolution()
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+
+      assertTrue(didHandleGoal)
+      assertTrue(!harness!!.journey.status.isLive)
     } finally {
       harness?.close()
     }
