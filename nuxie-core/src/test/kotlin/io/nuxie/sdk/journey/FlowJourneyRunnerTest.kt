@@ -68,6 +68,7 @@ class FlowJourneyRunnerTest {
     var trackResponder: suspend (event: String, properties: JsonObject?) -> EventResponse = { _, _ ->
       EventResponse(status = "ok")
     }
+    val batchCalls = mutableListOf<List<String>>()
 
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = ProfileResponse()
 
@@ -85,6 +86,7 @@ class FlowJourneyRunnerTest {
     }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
+      batchCalls += batch.batch.map { it.event }
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
     }
 
@@ -584,6 +586,95 @@ class FlowJourneyRunnerTest {
         ),
         apiCalls,
       )
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionRequeuesGoalHitWhenDirectSendThrows() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_requeue",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { GoalActionResolution(shouldExit = true) },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      assertTrue(harness!!.api.batchCalls.flatten().contains(JourneyEvents.journeyGoalHit))
+      assertTrue(
+        harness!!.eventService.getEventsForUser("user_1", limit = 20)
+          .any { it.name == JourneyEvents.journeyGoalHit },
+      )
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionEvaluatesUsingPreparedGoalHitIdWhenServerRewritesUuid() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_uuid",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var goalEventId: String? = null
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { goalEvent ->
+        goalEventId = goalEvent.id
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        EventResponse(
+          status = "ok",
+          event = EventResponse.EventInfo(id = "server_goal_event", processed = true),
+        )
+      } else {
+        EventResponse(status = "ok")
+      }
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+
+      val historyGoalEvent = harness!!.eventService.getEventsForUser("user_1", limit = 20)
+        .firstOrNull { it.name == JourneyEvents.journeyGoalHit }
+      assertNotNull(historyGoalEvent)
+      assertEquals(historyGoalEvent!!.id, goalEventId)
+      assertTrue(goalEventId != "server_goal_event")
     } finally {
       harness?.close()
     }

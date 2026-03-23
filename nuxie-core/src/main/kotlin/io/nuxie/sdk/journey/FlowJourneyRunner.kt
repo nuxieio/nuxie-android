@@ -1344,10 +1344,14 @@ class FlowJourneyRunner(
       )
     }.getOrNull() ?: return ActionResult.Continue
 
-    val trackedGoalEvent = runCatching {
-      eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true).first
-    }.getOrElse { goalEvent }
-    val resolution = onGoalActionHit(trackedGoalEvent)
+    runCatching {
+      eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true)
+    }.onFailure {
+      // If the synchronous trigger send fails, fall back to the normal queued path so the
+      // backend can still observe the goal hit that caused any immediate conversion.
+      eventService.trackPreparedEvent(goalEvent)
+    }
+    val resolution = onGoalActionHit(goalEvent)
     return when {
       resolution.shouldExit -> ActionResult.Exit(JourneyExitReason.GOAL_MET)
       !journey.status.isLive -> ActionResult.StopSequence
