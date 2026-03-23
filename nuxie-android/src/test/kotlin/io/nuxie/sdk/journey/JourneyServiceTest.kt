@@ -10,9 +10,11 @@ import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
 import io.nuxie.sdk.events.SystemEventNames
+import io.nuxie.sdk.events.store.EventHistoryStore
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
 import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
+import io.nuxie.sdk.events.store.StoredEvent
 import io.nuxie.sdk.features.FeatureAccess
 import io.nuxie.sdk.features.FeatureCheckResult
 import io.nuxie.sdk.features.FeatureService
@@ -190,6 +192,14 @@ class JourneyServiceTest {
     override suspend fun handleUserChange(fromOldDistinctId: String, toNewDistinctId: String) {}
     override suspend fun onAppBecameActive() {}
     override fun shutdown() {}
+  }
+
+  private class FailingInsertHistoryStore(
+    private val delegate: EventHistoryStore = InMemoryEventHistoryStore(),
+  ) : EventHistoryStore by delegate {
+    override suspend fun insert(event: StoredEvent) {
+      throw IllegalStateException("history_insert_failed")
+    }
   }
 
   @Test
@@ -410,6 +420,51 @@ class JourneyServiceTest {
       assertEquals(started.journey.id, active.first().id)
       assertEquals(null, active.first().convertedAtEpochMillis)
       assertTrue(!harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun runtimeGoalAction_routesToScopedGoalHandler() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_runtime_goal", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.id,
+        type = "action/goal",
+        payload = JsonObject(
+          mapOf(
+            "goalId" to JsonPrimitive(" signup_complete "),
+            "goalLabel" to JsonPrimitive(" Signed Up "),
+            "screenId" to JsonPrimitive("screen_1"),
+            "interactionId" to JsonPrimitive("int_goal"),
+          ),
+        ),
+        id = null,
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+
+      val tracked = harness.api.trackedEvents.last { it.event == JourneyEvents.journeyGoalHit }
+      assertEquals("signup_complete", tracked.properties?.get("goal_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("Signed Up", tracked.properties?.get("goal_label")?.jsonPrimitive?.contentOrNull)
+      assertEquals("screen_1", tracked.properties?.get("screen_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("int_goal", tracked.properties?.get("interaction_id")?.jsonPrimitive?.contentOrNull)
     } finally {
       harness.close()
     }
@@ -1410,6 +1465,40 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_keepsTransientHitWhenHistoryInsertFails() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+      historyStore = FailingInsertHistoryStore(),
+      presentFlowResult = false,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_history_failure", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedGoalEvent_doesNotDoubleCountSingleGoalHitDuringImmediateEvaluation() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
@@ -1752,6 +1841,7 @@ class JourneyServiceTest {
     beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
     trackFailure: Throwable? = null,
+    historyStore: EventHistoryStore = InMemoryEventHistoryStore(),
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
@@ -1807,7 +1897,6 @@ class JourneyServiceTest {
       this.beforeSend = beforeSend
     }
     val queueStore = InMemoryEventQueueStore()
-    val historyStore = InMemoryEventHistoryStore()
     val networkQueue = NuxieNetworkQueue(
       store = queueStore,
       api = api,

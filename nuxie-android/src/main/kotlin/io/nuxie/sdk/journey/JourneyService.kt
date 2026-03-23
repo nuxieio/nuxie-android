@@ -358,6 +358,22 @@ class JourneyService(
         }
       }
 
+      "action/goal" -> {
+        val goalId = payload.string("goalId")?.trim().orEmpty()
+        if (goalId.isBlank()) return
+        val rawGoalLabel = payload.string("goalLabel") ?: payload.string("label")
+        val goalLabel = rawGoalLabel?.trim()?.takeIf { it.isNotEmpty() }
+        val screenId = payload.string("screenId") ?: journey.flowState.currentScreenId
+        val interactionId = payload.string("interactionId")
+        handleScopedGoalEvent(
+          journeyId = journey.id,
+          goalId = goalId,
+          goalLabel = goalLabel,
+          screenId = screenId,
+          interactionId = interactionId,
+        )
+      }
+
       "action/purchase" -> {
         val screenId = payload.string("screenId") ?: journey.flowState.currentScreenId
         val instanceId = payload.string("instanceId")
@@ -641,17 +657,22 @@ class JourneyService(
     goalId: String,
     goalLabel: String?,
     screenId: String?,
+    interactionId: String? = null,
   ) {
     val journey = inMemoryJourneysById[journeyId] ?: return
     val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
+    val normalizedGoalId = goalId.trim()
+    if (normalizedGoalId.isEmpty()) return
+    val normalizedGoalLabel = goalLabel?.trim()?.takeIf { it.isNotEmpty() }
     val preparedEvent = try {
       eventService.prepareTriggerEvent(
         event = JourneyEvents.journeyGoalHit,
         properties = JourneyEvents.journeyGoalHitProperties(
           journey = journey,
           screenId = screenId,
-          goalId = goalId,
-          goalLabel = goalLabel,
+          interactionId = interactionId,
+          goalId = normalizedGoalId,
+          goalLabel = normalizedGoalLabel,
         ),
       )
     } catch (error: Throwable) {
@@ -687,7 +708,7 @@ class JourneyService(
     }
 
     val event = tracked?.first ?: preparedEvent
-    val transientEvents = if (tracked != null) emptyList() else listOf(storedEvent(preparedEvent))
+    val transientEvents = listOf(storedEvent(preparedEvent))
 
     evaluateGoalIfNeeded(journey, campaign, transientEvents = transientEvents)
     if (!shouldDeferExitDecision(journey.id)) {
