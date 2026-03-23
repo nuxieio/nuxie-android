@@ -1368,6 +1368,48 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_requeuesGoalHitWhenDirectSendFails() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = JourneyEvents.journeyGoalHit,
+      ),
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+      trackFailure = IllegalStateException("track_failed"),
+      presentFlowResult = false,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_requeue", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+      harness.eventService.flushEvents()
+      delay(80)
+
+      val trackedEvents = harness.api.trackedEvents.map { it.event }
+      val goalHitIndex = trackedEvents.indexOf(JourneyEvents.journeyGoalHit)
+      val goalMetIndex = trackedEvents.indexOf(JourneyEvents.journeyGoalMet)
+      val completedIndex = trackedEvents.indexOf("\$journey_completed")
+
+      assertTrue(goalHitIndex >= 0)
+      assertTrue(goalMetIndex > goalHitIndex)
+      assertTrue(completedIndex > goalHitIndex)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedGoalEvent_doesNotDoubleCountSingleGoalHitDuringImmediateEvaluation() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,

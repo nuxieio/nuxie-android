@@ -662,17 +662,29 @@ class JourneyService(
       return
     }
 
-    val tracked = runCatching {
+    val tracked = try {
       eventService.trackPreparedForTrigger(
         event = preparedEvent,
         persistToHistory = true,
       )
-    }.onFailure { error ->
+    } catch (error: Throwable) {
       NuxieLogger.warning(
         "JourneyService: Failed to track scoped goal event: ${error.message}",
         error,
       )
-    }.getOrNull()
+      runCatching {
+        eventService.enqueuePreparedEvent(
+          event = preparedEvent,
+          persistToHistory = false,
+        )
+      }.onFailure { fallbackError ->
+        NuxieLogger.warning(
+          "JourneyService: Failed to requeue scoped goal event: ${fallbackError.message}",
+          fallbackError,
+        )
+      }
+      null
+    }
 
     val event = tracked?.first ?: preparedEvent
     val transientEvents = if (tracked != null) emptyList() else listOf(storedEvent(preparedEvent))
