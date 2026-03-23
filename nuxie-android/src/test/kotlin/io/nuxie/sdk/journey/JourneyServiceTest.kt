@@ -74,6 +74,7 @@ class JourneyServiceTest {
     private val profile: ProfileResponse,
     private val remoteFlow: RemoteFlow,
     private val trackDelayMillis: Long = 0,
+    private val trackFailure: Throwable? = null,
   ) : NuxieApiProtocol {
     data class TrackedEvent(
       val event: String,
@@ -110,6 +111,7 @@ class JourneyServiceTest {
       if (trackDelayMillis > 0) {
         delay(trackDelayMillis)
       }
+      trackFailure?.let { throw it }
       recordTrackedEvent(event = event, distinctId = distinctId, properties = properties)
       return EventResponse(status = "ok")
     }
@@ -1053,6 +1055,87 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun explicitGoalAction_includesPriorNonNativeGoalHitsFromHistory() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Goal(goalId = "profile_complete")),
+          enabled = true,
+        )
+      )
+    )
+    val compositeGoal = GoalConfig(
+      kind = GoalConfig.Kind.ATTRIBUTE,
+      attributeExpr = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.And(
+          listOf(
+            IRExpr.EventsExists(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.PredAnd(
+                listOf(
+                  IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+                  IRExpr.Pred("eq", "goal_id", IRExpr.String("signup_complete")),
+                )
+              ),
+            ),
+            IRExpr.EventsExists(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.PredAnd(
+                listOf(
+                  IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+                  IRExpr.Pred("eq", "goal_id", IRExpr.String("profile_complete")),
+                )
+              ),
+            ),
+          )
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = compositeGoal,
+      exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_history", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.eventService.trackForTrigger(
+        JourneyEvents.journeyGoalHit,
+        properties = JourneyEvents.journeyGoalHitProperties(
+          journey = started.journey,
+          screenId = "screen_1",
+          goalId = "signup_complete",
+          goalLabel = "Signed Up",
+        ),
+      )
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(started.journey.id, active.first().id)
+      assertNotNull(active.first().convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedGoalEvent_completesPresentedJourneyAndUsesStandardJourneyKeys() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
@@ -1328,6 +1411,50 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_doesNotDoubleCountSingleGoalHitAfterTrackFailure() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.ATTRIBUTE,
+        attributeExpr = IREnvelope(
+          irVersion = 1,
+          expr = IRExpr.Compare(
+            op = ">",
+            left = IRExpr.EventsCount(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+            ),
+            right = IRExpr.Number(1.0),
+          ),
+        ),
+      ),
+      exitPolicy = null,
+      trackFailure = IllegalStateException("track_failed"),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_single_failure", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertEquals(null, active.first().convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,
@@ -1582,6 +1709,7 @@ class JourneyServiceTest {
     exitPolicy: ExitPolicy? = null,
     beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
+    trackFailure: Throwable? = null,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
     beforePresentFlow: (flowId: String, journeyId: String) -> Unit = { _, _ -> },
     presentFlowResult: Boolean = true,
@@ -1627,7 +1755,12 @@ class JourneyServiceTest {
       )
     )
 
-    val api = FakeApi(profile = profile, remoteFlow = remoteFlow, trackDelayMillis = trackDelayMillis)
+    val api = FakeApi(
+      profile = profile,
+      remoteFlow = remoteFlow,
+      trackDelayMillis = trackDelayMillis,
+      trackFailure = trackFailure,
+    )
     val config = NuxieConfiguration("test_key").apply {
       this.beforeSend = beforeSend
     }

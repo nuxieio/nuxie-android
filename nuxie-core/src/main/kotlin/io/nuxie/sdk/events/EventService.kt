@@ -208,35 +208,41 @@ class EventService(
       userProperties = userProperties,
       userPropertiesSetOnce = userPropertiesSetOnce,
     )
+    return trackPreparedForTrigger(finalEvent, persistToHistory = persistToHistory)
+  }
 
+  /**
+   * Track a pre-built trigger event synchronously and return the enriched event plus server response.
+   *
+   * Reusing the caller's prepared event preserves the event id across local history insertion
+   * and any fallback transient evaluation if the API call later fails.
+   */
+  suspend fun trackPreparedForTrigger(
+    event: NuxieEvent,
+    persistToHistory: Boolean = true,
+  ): Pair<NuxieEvent, EventResponse> {
     // Store event locally (best-effort) before trigger evaluation continues when the
     // event should participate in shared user event history.
     if (persistToHistory) {
-      runCatching { historyStore.insert(storedEvent(finalEvent)) }
+      runCatching { historyStore.insert(storedEvent(event)) }
     }
 
-    val propsJson: JsonObject = toJsonObject(finalEvent.properties)
-    val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)
+    val propsJson: JsonObject = toJsonObject(event.properties)
+    val anonDistinctId = (event.properties["\$anon_distinct_id"] as? String)
 
     val response = api.trackEvent(
-      event = finalEvent.name,
-      distinctId = finalEvent.distinctId,
+      event = event.name,
+      distinctId = event.distinctId,
       anonDistinctId = anonDistinctId,
       properties = propsJson,
-      uuid = finalEvent.id,
-      value = finalEvent.properties["value"] as? Double,
-      entityId = finalEvent.properties["entityId"] as? String,
-      timestamp = finalEvent.timestamp,
+      uuid = event.id,
+      value = event.properties["value"] as? Double,
+      entityId = event.properties["entityId"] as? String,
+      timestamp = event.timestamp,
     )
 
-    val eventId = response.event?.id ?: finalEvent.id
-    val enriched = NuxieEvent(
-      id = eventId,
-      name = finalEvent.name,
-      distinctId = finalEvent.distinctId,
-      properties = finalEvent.properties,
-      timestamp = finalEvent.timestamp,
-    )
+    val eventId = response.event?.id ?: event.id
+    val enriched = if (eventId == event.id) event else event.copy(id = eventId)
 
     return enriched to response
   }

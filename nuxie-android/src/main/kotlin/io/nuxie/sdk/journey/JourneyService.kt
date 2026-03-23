@@ -644,17 +644,27 @@ class JourneyService(
   ) {
     val journey = inMemoryJourneysById[journeyId] ?: return
     val campaign = getCampaign(journey.campaignId, journey.distinctId) ?: return
-    val properties = JourneyEvents.journeyGoalHitProperties(
-      journey = journey,
-      screenId = screenId,
-      goalId = goalId,
-      goalLabel = goalLabel,
-    )
+    val preparedEvent = try {
+      eventService.prepareTriggerEvent(
+        event = JourneyEvents.journeyGoalHit,
+        properties = JourneyEvents.journeyGoalHitProperties(
+          journey = journey,
+          screenId = screenId,
+          goalId = goalId,
+          goalLabel = goalLabel,
+        ),
+      )
+    } catch (error: Throwable) {
+      NuxieLogger.warning(
+        "JourneyService: Failed to prepare scoped goal event: ${error.message}",
+        error,
+      )
+      return
+    }
 
     val tracked = runCatching {
-      eventService.trackForTrigger(
-        JourneyEvents.journeyGoalHit,
-        properties = properties,
+      eventService.trackPreparedForTrigger(
+        event = preparedEvent,
         persistToHistory = true,
       )
     }.onFailure { error ->
@@ -664,19 +674,8 @@ class JourneyService(
       )
     }.getOrNull()
 
-    val event = tracked?.first ?: try {
-      eventService.prepareTriggerEvent(
-        event = JourneyEvents.journeyGoalHit,
-        properties = properties,
-      )
-    } catch (error: Throwable) {
-      NuxieLogger.warning(
-        "JourneyService: Failed to prepare scoped goal event: ${error.message}",
-        error,
-      )
-      return
-    }
-    val transientEvents = if (tracked != null) emptyList() else listOf(storedEvent(event))
+    val event = tracked?.first ?: preparedEvent
+    val transientEvents = if (tracked != null) emptyList() else listOf(storedEvent(preparedEvent))
 
     evaluateGoalIfNeeded(journey, campaign, transientEvents = transientEvents)
     if (!shouldDeferExitDecision(journey.id)) {
@@ -1155,7 +1154,17 @@ class JourneyService(
                 if (requiredHits.size == explicitGoalIds.size) {
                   requiredHits.maxOrNull()
                 } else {
-                  null
+                  val result =
+                    goalEvaluator.isGoalMet(
+                      journey,
+                      campaign,
+                      transientEvents = explicitGoalTransientEvents(journey, storedGoalEvent),
+                    )
+                  if (result.met) {
+                    result.atEpochMillis ?: hitAtEpochMillis
+                  } else {
+                    null
+                  }
                 }
               }
             }
