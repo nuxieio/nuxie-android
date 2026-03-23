@@ -658,7 +658,7 @@ class JourneyService(
         eventService.trackForTrigger(
           JourneyEvents.journeyGoalHit,
           properties = properties,
-          persistToHistory = false,
+          persistToHistory = true,
         )
       }.onFailure { error ->
         NuxieLogger.warning(

@@ -1680,7 +1680,6 @@ private val InteractionAction.actionType: String
     is InteractionAction.Experiment -> "experiment"
     is InteractionAction.Goal -> "goal"
     is InteractionAction.SendEvent -> "send_event"
-    is InteractionAction.Goal -> "goal"
     is InteractionAction.UpdateCustomer -> "update_customer"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"

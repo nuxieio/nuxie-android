@@ -521,8 +521,9 @@ class FlowJourneyRunnerTest {
     var harness: Harness? = null
     harness = newHarness(
       interactions = interactions,
-      onGoalHit = { _, _, _ ->
+      onGoalActionHit = { _ ->
         harness?.journey?.complete(JourneyExitReason.GOAL_MET)
+        GoalActionResolution()
       },
     )
     try {
@@ -866,7 +867,7 @@ class FlowJourneyRunnerTest {
   private fun newHarness(
     interactions: Map<String, List<Interaction>>,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
-    onGoalHit: (suspend (goalId: String, goalLabel: String?, screenId: String?) -> Unit)? = null,
+    onGoalActionHit: suspend (goalEvent: NuxieEvent) -> GoalActionResolution = { GoalActionResolution() },
   ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val api = FakeApi()
@@ -953,7 +954,7 @@ class FlowJourneyRunnerTest {
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,
-      onGoalHit = onGoalHit,
+      onGoalActionHit = onGoalActionHit,
     )
 
     return Harness(

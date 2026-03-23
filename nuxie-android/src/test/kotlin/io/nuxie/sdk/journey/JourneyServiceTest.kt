@@ -1041,6 +1041,75 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_persistsScopedGoalHitsForCompositeGoals() = runBlocking {
+    val goal = GoalConfig(
+      kind = GoalConfig.Kind.ATTRIBUTE,
+      attributeExpr = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.And(
+          listOf(
+            IRExpr.EventsExists(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.PredAnd(
+                listOf(
+                  IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+                  IRExpr.Pred("eq", "goal_id", IRExpr.String("signup_complete")),
+                )
+              ),
+            ),
+            IRExpr.EventsExists(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.PredAnd(
+                listOf(
+                  IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+                  IRExpr.Pred("eq", "goal_id", IRExpr.String("profile_complete")),
+                )
+              ),
+            ),
+          )
+        ),
+      ),
+      window = 60.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = goal,
+      exitPolicy = null,
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_combo", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      val afterFirst = harness.service.getActiveJourneys("user_1").first()
+      assertEquals(null, afterFirst.convertedAtEpochMillis)
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "profile_complete",
+        goalLabel = "Completed Profile",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      val afterSecond = harness.service.getActiveJourneys("user_1").first()
+      assertNotNull(afterSecond.convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,

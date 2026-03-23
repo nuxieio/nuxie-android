@@ -2,6 +2,7 @@ package io.nuxie.sdk.flows
 
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -153,5 +154,46 @@ class RemoteFlowDecodeTest {
     val permission = interactions[4]
     val requestPermission = permission.actions[0] as InteractionAction.RequestPermission
     assertEquals("camera", requestPermission.permissionType)
+  }
+
+  @Test
+  fun `goal actions require goalId`() = runTest {
+    val json = Json {
+      ignoreUnknownKeys = true
+      explicitNulls = false
+    }
+
+    val raw = """
+      {
+        "id": "flow_1",
+        "bundle": {
+          "url": "https://example.com/flows/flow_1/",
+          "manifest": {
+            "totalFiles": 1,
+            "totalSize": 10,
+            "contentHash": "sha256:abc",
+            "files": [
+              { "path": "index.html", "size": 10, "contentType": "text/html" }
+            ]
+          }
+        },
+        "screens": [{ "id": "screen_1" }],
+        "interactions": {
+          "screen_1": [
+            {
+              "id": "i1",
+              "trigger": { "type": "press" },
+              "actions": [
+                { "type": "goal" }
+              ]
+            }
+          ]
+        },
+        "viewModels": []
+      }
+    """.trimIndent()
+
+    val error = runCatching { json.decodeFromString(RemoteFlow.serializer(), raw) }.exceptionOrNull()
+    assertTrue(error is SerializationException)
   }
 }
