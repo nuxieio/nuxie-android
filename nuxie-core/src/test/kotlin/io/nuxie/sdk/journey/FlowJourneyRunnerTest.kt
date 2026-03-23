@@ -43,6 +43,7 @@ import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
+import io.nuxie.sdk.triggers.JourneyExitReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -503,6 +504,41 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun goalActionStopsExecutingAfterJourneyCompletes() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_stop",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+            InteractionAction.SendEvent(eventName = "should_not_run"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalHit = { _, _, _ ->
+        harness?.journey?.complete(JourneyExitReason.GOAL_MET)
+      },
+    )
+    try {
+      val activeHarness = harness!!
+      val outcome = activeHarness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val trackedNames = activeHarness.eventService.getEventsForUser("user_1", limit = 20).map { it.name }
+      assertTrue(trackedNames.none { it == "should_not_run" })
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
   fun delayActionPausesAndResumes() = runBlocking {
     val interactions = mapOf(
       "screen_1" to listOf(
@@ -830,6 +866,7 @@ class FlowJourneyRunnerTest {
   private fun newHarness(
     interactions: Map<String, List<Interaction>>,
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+    onGoalHit: (suspend (goalId: String, goalLabel: String?, screenId: String?) -> Unit)? = null,
   ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val api = FakeApi()
@@ -916,6 +953,7 @@ class FlowJourneyRunnerTest {
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,
+      onGoalHit = onGoalHit,
     )
 
     return Harness(

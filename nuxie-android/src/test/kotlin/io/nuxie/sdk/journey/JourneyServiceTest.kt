@@ -972,6 +972,83 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun scopedGoalEvent_dispatchesGoalHitTriggersIntoTheOwningJourney() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = mapOf(
+        "__global__" to listOf(
+          Interaction(
+            id = "goal_hit_exit",
+            trigger = InteractionTrigger.Event(eventName = JourneyEvents.journeyGoalHit),
+            actions = listOf(
+              InteractionAction.Exit(reason = "completed")
+            ),
+            enabled = true,
+          )
+        )
+      ),
+    )
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_trigger", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun scopedGoalEvent_resumesWaitUntilWork() = runBlocking {
+    val harness = newHarness(reentry = CampaignReentry.EveryTime)
+
+    try {
+      harness.service.initialize()
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_goal_wait", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first().journey
+
+      started.flowState.pendingAction = FlowPendingAction(
+        interactionId = "wait_goal",
+        screenId = null,
+        componentId = null,
+        actionIndex = 0,
+        kind = FlowPendingActionKind.WAIT_UNTIL,
+        resumeAtEpochMillis = null,
+        condition = null,
+        maxTimeMs = null,
+        startedAtEpochMillis = System.currentTimeMillis(),
+        resumeActions = listOf(InteractionAction.Exit(reason = "completed")),
+      )
+
+      harness.service.handleScopedGoalEvent(
+        journeyId = started.id,
+        goalId = "signup_complete",
+        goalLabel = "Signed Up",
+        screenId = "screen_1",
+      )
+      delay(80)
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.hasCompletedCampaign("user_1", "camp_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun scopedNotificationPermissionEvent_resumesWaitUntilBeforeTrackReturns() = runBlocking {
     val harness = newHarness(
       reentry = CampaignReentry.EveryTime,

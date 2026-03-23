@@ -1329,7 +1329,8 @@ class FlowJourneyRunner(
     action: InteractionAction.Goal,
     context: RuntimeTriggerContext,
   ): ActionResult {
-    val goalId = action.goalId.ifBlank { "primary" }
+    val goalId = action.goalId.trim().ifEmpty { "primary" }
+    val goalLabel = action.label?.trim()?.takeIf { it.isNotEmpty() }
     val goalEvent = runCatching {
       eventService.prepareTriggerEvent(
         JourneyEvents.journeyGoalHit,
@@ -1338,17 +1339,17 @@ class FlowJourneyRunner(
           screenId = context.screenId ?: journey.flowState.currentScreenId,
           interactionId = context.interactionId,
           goalId = goalId,
-          goalLabel = action.label,
+          goalLabel = goalLabel,
         )
       )
     }.getOrNull() ?: return ActionResult.Continue
 
     eventService.trackPreparedEvent(goalEvent)
     val resolution = onGoalActionHit(goalEvent)
-    return if (resolution.shouldExit) {
-      ActionResult.Exit(JourneyExitReason.GOAL_MET)
-    } else {
-      ActionResult.Continue
+    return when {
+      resolution.shouldExit -> ActionResult.Exit(JourneyExitReason.GOAL_MET)
+      !journey.status.isLive -> ActionResult.StopSequence
+      else -> ActionResult.Continue
     }
   }
 

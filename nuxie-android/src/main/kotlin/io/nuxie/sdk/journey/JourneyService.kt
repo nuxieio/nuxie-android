@@ -671,6 +671,24 @@ class JourneyService(
       }
     }
 
+    val pending = journey.flowState.pendingAction
+    if (pending != null && pending.kind == FlowPendingActionKind.WAIT_UNTIL) {
+      val runner = flowRunners[journey.id]
+      if (runner != null) {
+        val outcome = runner.resumePendingAction(ResumeReason.EVENT, event)
+        handleOutcome(outcome, journey)
+      }
+      if (journey.status.isLive) {
+        persistJourney(journey)
+      }
+      return
+    }
+
+    val runner = flowRunners[journey.id]
+    if (runner != null) {
+      val outcome = runner.dispatchEventTrigger(event)
+      handleOutcome(outcome, journey)
+    }
     if (journey.status.isLive) {
       persistJourney(journey)
     }
