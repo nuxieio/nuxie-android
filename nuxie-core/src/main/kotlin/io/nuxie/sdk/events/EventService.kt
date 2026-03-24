@@ -180,6 +180,8 @@ class EventService(
 
   suspend fun getQueuedEventCount(): Int = store.size()
 
+  suspend fun deleteHistoryEvent(eventId: String): Boolean = historyStore.deleteEvent(eventId)
+
   suspend fun pauseEventQueue() = networkQueue.pause()
 
   suspend fun resumeEventQueue() = networkQueue.resume()

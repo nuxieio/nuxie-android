@@ -695,7 +695,7 @@ class JourneyService(
         "JourneyService: Failed to track scoped goal event: ${error.message}",
         error,
       )
-      runCatching {
+      val requeued = runCatching {
         eventService.enqueuePreparedEvent(
           event = preparedEvent,
           persistToHistory = false,
@@ -705,6 +705,11 @@ class JourneyService(
           "JourneyService: Failed to requeue scoped goal event: ${fallbackError.message}",
           fallbackError,
         )
+      }.getOrNull()
+      if (requeued == false) {
+        runCatching { eventService.deleteHistoryEvent(preparedEvent.id) }
+        NuxieLogger.warning("JourneyService: Dropping scoped goal evaluation because fallback queue rejected the goal hit")
+        return
       }
       null
     }
@@ -1129,10 +1134,11 @@ class JourneyService(
     if (journey.convertedAtEpochMillis != null) return
     if (journey.goalSnapshot == null) return
 
-    val mergedTransientEvents = (explicitGoalEvents(journey) + scopedGoalEvents(journey) + transientEvents)
-      .distinctBy { it.id }
-      .sortedBy { it.timestampEpochMillis }
-    val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = mergedTransientEvents)
+    val result = goalEvaluator.isGoalMet(
+      journey,
+      campaign,
+      transientEvents = mergedGoalTransientEvents(journey, transientEvents),
+    )
     if (result.met && result.atEpochMillis != null) {
       val metAt = result.atEpochMillis ?: return
       latchGoalConversion(journey, metAt)
@@ -1165,7 +1171,7 @@ class JourneyService(
             goalEvaluator.isGoalMet(
               journey,
               campaign,
-              transientEvents = explicitGoalTransientEvents(journey, storedGoalEvent),
+              transientEvents = mergedGoalTransientEvents(journey, listOf(storedGoalEvent)),
             )
           if (result.met) {
             result.atEpochMillis ?: hitAtEpochMillis
@@ -1198,7 +1204,7 @@ class JourneyService(
                     goalEvaluator.isGoalMet(
                       journey,
                       campaign,
-                      transientEvents = explicitGoalTransientEvents(journey, storedGoalEvent),
+                      transientEvents = mergedGoalTransientEvents(journey, listOf(storedGoalEvent)),
                     )
                   if (result.met) {
                     result.atEpochMillis ?: hitAtEpochMillis
@@ -1286,11 +1292,11 @@ class JourneyService(
     return contextStoredEvents(journey, SCOPED_GOAL_EVENTS_CONTEXT_KEY)
   }
 
-  private fun explicitGoalTransientEvents(
+  private fun mergedGoalTransientEvents(
     journey: Journey,
-    currentEvent: StoredEvent,
+    transientEvents: List<StoredEvent>,
   ): List<StoredEvent> {
-    return (explicitGoalEvents(journey) + currentEvent)
+    return (explicitGoalEvents(journey) + scopedGoalEvents(journey) + transientEvents)
       .distinctBy { it.id }
       .sortedBy { it.timestampEpochMillis }
   }

@@ -891,7 +891,7 @@ class FlowJourneyRunnerTest {
       assertTrue(harness.journey.status.isLive)
       assertTrue(
         harness.eventService.getEventsForUser("user_1", limit = 20)
-          .any { it.name == JourneyEvents.journeyGoalHit },
+          .none { it.name == JourneyEvents.journeyGoalHit },
       )
     } finally {
       harness.close()

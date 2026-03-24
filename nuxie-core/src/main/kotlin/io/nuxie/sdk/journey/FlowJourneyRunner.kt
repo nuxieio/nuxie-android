@@ -1368,6 +1368,7 @@ class FlowJourneyRunner(
         error,
       )
       if (requeued == false) {
+        runCatching { eventService.deleteHistoryEvent(goalEvent.id) }
         shouldHandleGoalHit = false
         NuxieLogger.warning("FlowJourneyRunner: Dropping goal evaluation because fallback queue rejected the goal hit")
       }
