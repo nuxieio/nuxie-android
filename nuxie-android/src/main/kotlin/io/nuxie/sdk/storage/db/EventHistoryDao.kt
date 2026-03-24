@@ -10,6 +10,9 @@ internal interface EventHistoryDao {
   @Insert(onConflict = OnConflictStrategy.ABORT)
   suspend fun insert(entity: EventHistoryEntity)
 
+  @Query("DELETE FROM nuxie_event_history WHERE id = :id")
+  suspend fun deleteById(id: String): Int
+
   @Query("SELECT * FROM nuxie_event_history ORDER BY timestampEpochMillis DESC, createdAtMs DESC LIMIT :limit")
   suspend fun recent(limit: Int): List<EventHistoryEntity>
 
@@ -28,4 +31,3 @@ internal interface EventHistoryDao {
   @Query("DELETE FROM nuxie_event_history")
   suspend fun clear()
 }
-

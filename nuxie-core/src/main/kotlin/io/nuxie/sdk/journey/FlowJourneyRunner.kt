@@ -21,6 +21,7 @@ import io.nuxie.sdk.ir.IRUserProps
 import io.nuxie.sdk.network.models.ExperimentAssignment
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
+import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.triggers.JourneyExitReason
 import io.nuxie.sdk.util.fromJsonElement
 import io.nuxie.sdk.util.toJsonElement
@@ -1329,7 +1330,12 @@ class FlowJourneyRunner(
     action: InteractionAction.Goal,
     context: RuntimeTriggerContext,
   ): ActionResult {
-    val goalId = action.goalId.ifBlank { "primary" }
+    val goalId = action.goalId.trim()
+    if (goalId.isBlank()) {
+      NuxieLogger.warning("FlowJourneyRunner: Skipping goal action with blank goalId")
+      return ActionResult.Continue
+    }
+    val goalLabel = action.label?.trim()?.takeIf { it.isNotEmpty() }
     val goalEvent = runCatching {
       eventService.prepareTriggerEvent(
         JourneyEvents.journeyGoalHit,
@@ -1338,17 +1344,41 @@ class FlowJourneyRunner(
           screenId = context.screenId ?: journey.flowState.currentScreenId,
           interactionId = context.interactionId,
           goalId = goalId,
-          goalLabel = action.label,
+          goalLabel = goalLabel,
         )
       )
     }.getOrNull() ?: return ActionResult.Continue
 
-    eventService.trackPreparedEvent(goalEvent)
+    var shouldHandleGoalHit = true
+    runCatching {
+      eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true)
+    }.onFailure { error ->
+      // If the synchronous trigger send fails, fall back to the normal queued path so the
+      // backend can still observe the goal hit that caused any immediate conversion.
+      val requeued = runCatching {
+        eventService.enqueuePreparedEvent(goalEvent, persistToHistory = false)
+      }.onFailure { fallbackError ->
+        NuxieLogger.warning(
+          "FlowJourneyRunner: Failed to requeue goal event after direct send failure: ${fallbackError.message}",
+          fallbackError,
+        )
+      }.getOrNull()
+      NuxieLogger.warning(
+        "FlowJourneyRunner: Failed to track goal event directly: ${error.message}",
+        error,
+      )
+      if (requeued == false) {
+        runCatching { eventService.deleteHistoryEvent(goalEvent.id) }
+        shouldHandleGoalHit = false
+        NuxieLogger.warning("FlowJourneyRunner: Dropping goal evaluation because fallback queue rejected the goal hit")
+      }
+    }
+    if (!shouldHandleGoalHit) return ActionResult.Continue
     val resolution = onGoalActionHit(goalEvent)
-    return if (resolution.shouldExit) {
-      ActionResult.Exit(JourneyExitReason.GOAL_MET)
-    } else {
-      ActionResult.Continue
+    return when {
+      resolution.shouldExit -> ActionResult.Exit(JourneyExitReason.GOAL_MET)
+      !journey.status.isLive -> ActionResult.StopSequence
+      else -> ActionResult.Continue
     }
   }
 
@@ -1677,8 +1707,8 @@ private val InteractionAction.actionType: String
     is InteractionAction.WaitUntil -> "wait_until"
     is InteractionAction.Condition -> "condition"
     is InteractionAction.Experiment -> "experiment"
-    is InteractionAction.SendEvent -> "send_event"
     is InteractionAction.Goal -> "goal"
+    is InteractionAction.SendEvent -> "send_event"
     is InteractionAction.UpdateCustomer -> "update_customer"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"

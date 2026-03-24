@@ -7,6 +7,7 @@ package io.nuxie.sdk.events.store
  */
 interface EventHistoryStore {
   suspend fun insert(event: StoredEvent)
+  suspend fun deleteEvent(id: String): Boolean
   suspend fun getRecentEvents(limit: Int): List<StoredEvent>
   suspend fun getEventsForUser(distinctId: String, limit: Int): List<StoredEvent>
   suspend fun count(): Int
@@ -14,4 +15,3 @@ interface EventHistoryStore {
   suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int
   suspend fun clear()
 }
-

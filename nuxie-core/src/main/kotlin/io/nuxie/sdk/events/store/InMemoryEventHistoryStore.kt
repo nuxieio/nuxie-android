@@ -15,6 +15,14 @@ class InMemoryEventHistoryStore : EventHistoryStore {
     orderedIds.add(event.id)
   }
 
+  override suspend fun deleteEvent(id: String): Boolean {
+    val removed = byId.remove(id) != null
+    if (removed) {
+      orderedIds.remove(id)
+    }
+    return removed
+  }
+
   override suspend fun getRecentEvents(limit: Int): List<StoredEvent> {
     return orderedIds.asReversed()
       .take(limit)
@@ -58,4 +66,3 @@ class InMemoryEventHistoryStore : EventHistoryStore {
     orderedIds.clear()
   }
 }
-

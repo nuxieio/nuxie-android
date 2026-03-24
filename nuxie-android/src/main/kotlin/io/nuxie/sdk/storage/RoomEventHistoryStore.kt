@@ -15,6 +15,10 @@ internal class RoomEventHistoryStore(
     dao.insert(EventHistoryEntity.from(event, json, createdAtMs = nowEpochMillis()))
   }
 
+  override suspend fun deleteEvent(id: String): Boolean {
+    return dao.deleteById(id) > 0
+  }
+
   override suspend fun getRecentEvents(limit: Int): List<StoredEvent> {
     return dao.recent(limit).map { it.toStoredEvent(json) }
   }
@@ -35,4 +39,3 @@ internal class RoomEventHistoryStore(
 
   override suspend fun clear() = dao.clear()
 }
-

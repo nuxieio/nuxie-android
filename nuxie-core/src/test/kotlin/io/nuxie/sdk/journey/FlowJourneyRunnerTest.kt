@@ -7,8 +7,10 @@ import io.nuxie.sdk.campaigns.EventTriggerConfig
 import io.nuxie.sdk.config.NuxieConfiguration
 import io.nuxie.sdk.events.EventService
 import io.nuxie.sdk.events.NuxieEvent
+import io.nuxie.sdk.events.queue.EventQueueStore
 import io.nuxie.sdk.events.queue.InMemoryEventQueueStore
 import io.nuxie.sdk.events.queue.NuxieNetworkQueue
+import io.nuxie.sdk.events.queue.QueuedEvent
 import io.nuxie.sdk.events.store.InMemoryEventHistoryStore
 import io.nuxie.sdk.features.FeatureAccess
 import io.nuxie.sdk.features.FeatureCheckResult
@@ -43,6 +45,7 @@ import io.nuxie.sdk.network.models.ProfileResponse
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
+import io.nuxie.sdk.triggers.JourneyExitReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -67,6 +70,8 @@ class FlowJourneyRunnerTest {
     var trackResponder: suspend (event: String, properties: JsonObject?) -> EventResponse = { _, _ ->
       EventResponse(status = "ok")
     }
+    val batchCalls = mutableListOf<List<String>>()
+    val callLog = mutableListOf<String>()
 
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = ProfileResponse()
 
@@ -80,10 +85,13 @@ class FlowJourneyRunnerTest {
       entityId: String?,
       timestamp: String,
     ): EventResponse {
+      callLog += "track:$event"
       return trackResponder(event, properties)
     }
 
     override suspend fun sendBatch(batch: BatchRequest): BatchResponse {
+      batchCalls += batch.batch.map { it.event }
+      callLog += batch.batch.map { "batch:${it.event}" }
       return BatchResponse(status = "ok", processed = batch.batch.size, failed = 0, total = batch.batch.size)
     }
 
@@ -137,6 +145,92 @@ class FlowJourneyRunnerTest {
     override suspend fun handleUserChange(fromOldDistinctId: String, toNewDistinctId: String) {}
     override suspend fun syncFeatureInfo() {}
     override suspend fun updateFromPurchase(features: List<PurchaseFeature>) {}
+  }
+
+  private class DelayingEventQueueStore(
+    private val delegate: EventQueueStore = InMemoryEventQueueStore(),
+    private val delayedEventNames: Set<String>,
+    private val delayMillis: Long,
+  ) : EventQueueStore {
+    override suspend fun enqueue(event: QueuedEvent): Boolean {
+      if (event.name in delayedEventNames) {
+        delay(delayMillis)
+      }
+      return delegate.enqueue(event)
+    }
+
+    override suspend fun size(): Int = delegate.size()
+
+    override suspend fun peek(limit: Int): List<QueuedEvent> = delegate.peek(limit)
+
+    override suspend fun delete(ids: List<String>) {
+      delegate.delete(ids)
+    }
+
+    override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+      return delegate.reassignDistinctId(fromDistinctId, toDistinctId)
+    }
+
+    override suspend fun clear() {
+      delegate.clear()
+    }
+  }
+
+  private class ThrowingEventQueueStore(
+    private val delegate: EventQueueStore = InMemoryEventQueueStore(),
+    private val throwingEventNames: Set<String>,
+    private val failure: Throwable = IllegalStateException("queue_failed"),
+  ) : EventQueueStore {
+    override suspend fun enqueue(event: QueuedEvent): Boolean {
+      if (event.name in throwingEventNames) {
+        throw failure
+      }
+      return delegate.enqueue(event)
+    }
+
+    override suspend fun size(): Int = delegate.size()
+
+    override suspend fun peek(limit: Int): List<QueuedEvent> = delegate.peek(limit)
+
+    override suspend fun delete(ids: List<String>) {
+      delegate.delete(ids)
+    }
+
+    override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+      return delegate.reassignDistinctId(fromDistinctId, toDistinctId)
+    }
+
+    override suspend fun clear() {
+      delegate.clear()
+    }
+  }
+
+  private class DroppingEventQueueStore(
+    private val delegate: EventQueueStore = InMemoryEventQueueStore(),
+    private val droppedEventNames: Set<String>,
+  ) : EventQueueStore {
+    override suspend fun enqueue(event: QueuedEvent): Boolean {
+      if (event.name in droppedEventNames) {
+        return false
+      }
+      return delegate.enqueue(event)
+    }
+
+    override suspend fun size(): Int = delegate.size()
+
+    override suspend fun peek(limit: Int): List<QueuedEvent> = delegate.peek(limit)
+
+    override suspend fun delete(ids: List<String>) {
+      delegate.delete(ids)
+    }
+
+    override suspend fun reassignDistinctId(fromDistinctId: String, toDistinctId: String): Int {
+      return delegate.reassignDistinctId(fromDistinctId, toDistinctId)
+    }
+
+    override suspend fun clear() {
+      delegate.clear()
+    }
   }
 
   private class FakeProfileService(
@@ -211,9 +305,11 @@ class FlowJourneyRunnerTest {
 
   private data class Harness(
     val scope: CoroutineScope,
+    val api: FakeApi,
     val runner: FlowJourneyRunner,
     val host: FakeHost,
     val journey: Journey,
+    val eventService: EventService,
   ) {
     fun close() {
       scope.cancel()
@@ -463,6 +559,401 @@ class FlowJourneyRunnerTest {
       )
     } finally {
       harness.close()
+    }
+  }
+
+  @Test
+  fun goalActionTracksStandardJourneyPropertyKeys() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = " signup_complete ", label = " Signed Up "),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    val harness = newHarness(interactions = interactions)
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val goalEvent = harness.eventService.getEventsForUser("user_1", limit = 20)
+        .last { it.name == JourneyEvents.journeyGoalHit }
+      assertEquals(harness.journey.id, goalEvent.properties["journey_id"])
+      assertEquals("camp_1", goalEvent.properties["campaign_id"])
+      assertEquals("signup_complete", goalEvent.properties["goal_id"])
+      assertEquals("Signed Up", goalEvent.properties["goal_label"])
+      assertEquals(null, goalEvent.properties["journeyId"])
+      assertEquals(null, goalEvent.properties["campaignId"])
+      assertEquals(null, goalEvent.properties["goalId"])
+      assertEquals(null, goalEvent.properties["goalLabel"])
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun goalActionSkipsBlankGoalIdWithoutDefaultingToPrimary() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_blank",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "   ", label = "Ignored"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var goalHits = 0
+    val harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        goalHits += 1
+        GoalActionResolution()
+      },
+    )
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val trackedNames = harness.eventService.getEventsForUser("user_1", limit = 20).map { it.name }
+      assertTrue(trackedNames.none { it == JourneyEvents.journeyGoalHit })
+      assertEquals(0, goalHits)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun goalActionStopsExecutingAfterJourneyCompletes() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_stop",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+            InteractionAction.SendEvent(eventName = "should_not_run"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        harness?.journey?.complete(JourneyExitReason.GOAL_MET)
+        GoalActionResolution()
+      },
+    )
+    try {
+      val activeHarness = harness!!
+      val outcome = activeHarness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val trackedNames = activeHarness.eventService.getEventsForUser("user_1", limit = 20).map { it.name }
+      assertTrue(trackedNames.none { it == "should_not_run" })
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionTracksGoalHitBeforeSynchronousFollowUpTriggerSends() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_ordering",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    val apiCalls = mutableListOf<String>()
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        apiCalls += "callback:start"
+        harness!!.eventService.trackForTrigger(
+          event = "after_goal",
+          properties = mapOf("journey_id" to harness!!.journey.id),
+        )
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      apiCalls += "track:$event"
+      EventResponse(status = "ok")
+    }
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      assertEquals(
+        listOf(
+          "track:${JourneyEvents.journeyGoalHit}",
+          "callback:start",
+          "track:after_goal",
+        ),
+        apiCalls,
+      )
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionRequeuesGoalHitWhenDirectSendThrows() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_requeue",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { GoalActionResolution(shouldExit = true) },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      assertTrue(harness!!.api.batchCalls.flatten().contains(JourneyEvents.journeyGoalHit))
+      assertTrue(
+        harness!!.eventService.getEventsForUser("user_1", limit = 20)
+          .any { it.name == JourneyEvents.journeyGoalHit },
+      )
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionEvaluatesUsingPreparedGoalHitIdWhenServerRewritesUuid() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_uuid",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var goalEventId: String? = null
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { goalEvent ->
+        goalEventId = goalEvent.id
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        EventResponse(
+          status = "ok",
+          event = EventResponse.EventInfo(id = "server_goal_event", processed = true),
+        )
+      } else {
+        EventResponse(status = "ok")
+      }
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+
+      val historyGoalEvent = harness!!.eventService.getEventsForUser("user_1", limit = 20)
+        .firstOrNull { it.name == JourneyEvents.journeyGoalHit }
+      assertNotNull(historyGoalEvent)
+      assertEquals(historyGoalEvent!!.id, goalEventId)
+      assertTrue(goalEventId != "server_goal_event")
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionStillEvaluatesWhenFallbackQueueingThrows() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_queue_throw",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    var didHandleGoal = false
+    harness = newHarness(
+      interactions = interactions,
+      queueStore = ThrowingEventQueueStore(
+        throwingEventNames = setOf(JourneyEvents.journeyGoalHit),
+      ),
+      onGoalActionHit = {
+        didHandleGoal = true
+        harness!!.journey.complete(JourneyExitReason.GOAL_MET)
+        GoalActionResolution()
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+
+      assertTrue(didHandleGoal)
+      assertTrue(!harness!!.journey.status.isLive)
+    } finally {
+      harness?.close()
+    }
+  }
+
+  @Test
+  fun goalActionDoesNotEvaluateWhenFallbackQueueDropsGoalHit() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_queue_drop",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var didHandleGoal = false
+    val harness = newHarness(
+      interactions = interactions,
+      queueStore = DroppingEventQueueStore(
+        droppedEventNames = setOf(JourneyEvents.journeyGoalHit),
+      ),
+      onGoalActionHit = {
+        didHandleGoal = true
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness.runner.handleRuntimeReady()
+      settle()
+
+      assertTrue(!didHandleGoal)
+      assertTrue(harness.journey.status.isLive)
+      assertTrue(
+        harness.eventService.getEventsForUser("user_1", limit = 20)
+          .none { it.name == JourneyEvents.journeyGoalHit },
+      )
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun goalActionFlushesQueuedFallbackBeforeFollowUpTriggerSends() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "goal_start_fallback_ordering",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        )
+      )
+    )
+    var harness: Harness? = null
+    harness = newHarness(
+      interactions = interactions,
+      queueStore = DelayingEventQueueStore(
+        delayedEventNames = setOf(JourneyEvents.journeyGoalHit),
+        delayMillis = 75,
+      ),
+      onGoalActionHit = { _ ->
+        harness!!.api.callLog += "callback:start"
+        harness!!.eventService.trackForTrigger(
+          event = "after_goal",
+          properties = mapOf("journey_id" to harness!!.journey.id),
+        )
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    harness!!.api.trackResponder = { event, _ ->
+      if (event == JourneyEvents.journeyGoalHit) {
+        throw IllegalStateException("offline")
+      }
+      EventResponse(status = "ok")
+    }
+
+    try {
+      harness!!.runner.handleRuntimeReady()
+      settle()
+      harness!!.eventService.flushEvents()
+
+      val goalHitAttemptIndex = harness!!.api.callLog.indexOf("track:${JourneyEvents.journeyGoalHit}")
+      val callbackIndex = harness!!.api.callLog.indexOf("callback:start")
+      val goalHitBatchIndex = harness!!.api.callLog.indexOf("batch:${JourneyEvents.journeyGoalHit}")
+      val followUpTrackIndex = harness!!.api.callLog.indexOf("track:after_goal")
+
+      assertTrue(goalHitAttemptIndex >= 0)
+      assertTrue(callbackIndex >= 0)
+      assertTrue(goalHitBatchIndex >= 0)
+      assertTrue(followUpTrackIndex >= 0)
+      assertTrue(goalHitAttemptIndex < callbackIndex)
+      assertTrue(callbackIndex < goalHitBatchIndex)
+      assertTrue(goalHitBatchIndex < followUpTrackIndex)
+    } finally {
+      harness?.close()
     }
   }
 
@@ -793,7 +1284,9 @@ class FlowJourneyRunnerTest {
 
   private fun newHarness(
     interactions: Map<String, List<Interaction>>,
+    queueStore: EventQueueStore = InMemoryEventQueueStore(),
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
+    onGoalActionHit: suspend (goalEvent: NuxieEvent) -> GoalActionResolution = { GoalActionResolution() },
   ): Harness {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val api = FakeApi()
@@ -802,7 +1295,6 @@ class FlowJourneyRunnerTest {
 
     val session = io.nuxie.sdk.session.DefaultSessionService()
     val config = NuxieConfiguration(apiKey = "test_key")
-    val queueStore = InMemoryEventQueueStore()
     val historyStore = InMemoryEventHistoryStore()
     val networkQueue = NuxieNetworkQueue(
       store = queueStore,
@@ -880,9 +1372,17 @@ class FlowJourneyRunnerTest {
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,
+      onGoalActionHit = onGoalActionHit,
     )
 
-    return Harness(scope = scope, runner = runner, host = host, journey = journey)
+    return Harness(
+      scope = scope,
+      api = api,
+      runner = runner,
+      host = host,
+      journey = journey,
+      eventService = eventService,
+    )
   }
 
   private fun buildFlow(interactions: Map<String, List<Interaction>>): RemoteFlow {

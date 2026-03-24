@@ -122,6 +122,26 @@ object JourneyEvents {
     return props
   }
 
+  fun journeyGoalHitProperties(
+    journey: Journey,
+    screenId: String?,
+    goalId: String,
+    goalLabel: String?,
+  ): Map<String, Any?> {
+    val props = mutableMapOf<String, Any?>(
+      "journey_id" to journey.id,
+      "campaign_id" to journey.campaignId,
+      "goal_id" to goalId,
+    )
+    if (!screenId.isNullOrBlank()) {
+      props["screen_id"] = screenId
+    }
+    if (!goalLabel.isNullOrBlank()) {
+      props["goal_label"] = goalLabel
+    }
+    return props
+  }
+
   fun journeyExitedProperties(
     journey: Journey,
     reason: JourneyExitReason,

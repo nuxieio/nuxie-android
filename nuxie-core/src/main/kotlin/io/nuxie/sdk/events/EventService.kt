@@ -132,11 +132,26 @@ class EventService(
   }
 
   fun trackPreparedEvent(event: NuxieEvent) {
-    // Mirror iOS route(): user property extraction is driven by local events.
+    // Capture user-property side effects on the caller's current identity before
+    // the background enqueue can race with identify()/reset().
     extractUserProperties(event)
+    scope.launch {
+      enqueuePreparedEvent(event, persistToHistory = true, applyUserProperties = false)
+    }
+  }
+
+  suspend fun enqueuePreparedEvent(
+    event: NuxieEvent,
+    persistToHistory: Boolean = true,
+    applyUserProperties: Boolean = true,
+  ): Boolean {
+    // Mirror iOS route(): user property extraction is driven by local events.
+    if (applyUserProperties) {
+      extractUserProperties(event)
+    }
 
     // Store event locally (best-effort) for IR evaluation (segments/journeys).
-    scope.launch {
+    if (persistToHistory) {
       runCatching { historyStore.insert(storedEvent(event)) }
     }
 
@@ -154,17 +169,18 @@ class EventService(
       entityId = event.properties["entityId"] as? String,
     )
 
-    scope.launch {
-      val ok = networkQueue.enqueue(queued)
-      if (!ok) {
-        NuxieLogger.warning("Dropped event due to queue limits: ${queued.name}")
-      }
+    val ok = networkQueue.enqueue(queued)
+    if (!ok) {
+      NuxieLogger.warning("Dropped event due to queue limits: ${queued.name}")
     }
+    return ok
   }
 
   suspend fun flushEvents(): Boolean = networkQueue.flush(forceSend = true)
 
   suspend fun getQueuedEventCount(): Int = store.size()
+
+  suspend fun deleteHistoryEvent(eventId: String): Boolean = historyStore.deleteEvent(eventId)
 
   suspend fun pauseEventQueue() = networkQueue.pause()
 
@@ -200,43 +216,51 @@ class EventService(
       throw IllegalArgumentException("Event name cannot be empty")
     }
 
-    // Ensure any queued events are delivered first so the trigger call observes a consistent order.
-    runCatching { networkQueue.flush(forceSend = true) }
     val finalEvent = prepareTriggerEvent(
       event = event,
       properties = properties,
       userProperties = userProperties,
       userPropertiesSetOnce = userPropertiesSetOnce,
     )
+    return trackPreparedForTrigger(finalEvent, persistToHistory = persistToHistory)
+  }
+
+  /**
+   * Track a pre-built trigger event synchronously and return the enriched event plus server response.
+   *
+   * Reusing the caller's prepared event preserves the event id across local history insertion
+   * and any fallback transient evaluation if the API call later fails.
+   */
+  suspend fun trackPreparedForTrigger(
+    event: NuxieEvent,
+    persistToHistory: Boolean = true,
+  ): Pair<NuxieEvent, EventResponse> {
+    // Ensure any queued events are delivered first so direct trigger sends preserve
+    // the same server-side ordering guarantees as trackForTrigger(...).
+    runCatching { networkQueue.flush(forceSend = true) }
 
     // Store event locally (best-effort) before trigger evaluation continues when the
     // event should participate in shared user event history.
     if (persistToHistory) {
-      runCatching { historyStore.insert(storedEvent(finalEvent)) }
+      runCatching { historyStore.insert(storedEvent(event)) }
     }
 
-    val propsJson: JsonObject = toJsonObject(finalEvent.properties)
-    val anonDistinctId = (finalEvent.properties["\$anon_distinct_id"] as? String)
+    val propsJson: JsonObject = toJsonObject(event.properties)
+    val anonDistinctId = (event.properties["\$anon_distinct_id"] as? String)
 
     val response = api.trackEvent(
-      event = finalEvent.name,
-      distinctId = finalEvent.distinctId,
+      event = event.name,
+      distinctId = event.distinctId,
       anonDistinctId = anonDistinctId,
       properties = propsJson,
-      uuid = finalEvent.id,
-      value = finalEvent.properties["value"] as? Double,
-      entityId = finalEvent.properties["entityId"] as? String,
-      timestamp = finalEvent.timestamp,
+      uuid = event.id,
+      value = event.properties["value"] as? Double,
+      entityId = event.properties["entityId"] as? String,
+      timestamp = event.timestamp,
     )
 
-    val eventId = response.event?.id ?: finalEvent.id
-    val enriched = NuxieEvent(
-      id = eventId,
-      name = finalEvent.name,
-      distinctId = finalEvent.distinctId,
-      properties = finalEvent.properties,
-      timestamp = finalEvent.timestamp,
-    )
+    val eventId = response.event?.id ?: event.id
+    val enriched = if (eventId == event.id) event else event.copy(id = eventId)
 
     return enriched to response
   }
