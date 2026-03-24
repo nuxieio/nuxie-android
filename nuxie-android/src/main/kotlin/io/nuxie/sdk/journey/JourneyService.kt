@@ -1129,7 +1129,7 @@ class JourneyService(
     if (journey.convertedAtEpochMillis != null) return
     if (journey.goalSnapshot == null) return
 
-    val mergedTransientEvents = (scopedGoalEvents(journey) + transientEvents)
+    val mergedTransientEvents = (explicitGoalEvents(journey) + scopedGoalEvents(journey) + transientEvents)
       .distinctBy { it.id }
       .sortedBy { it.timestampEpochMillis }
     val result = goalEvaluator.isGoalMet(journey, campaign, transientEvents = mergedTransientEvents)

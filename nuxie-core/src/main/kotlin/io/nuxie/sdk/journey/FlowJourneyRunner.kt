@@ -1349,24 +1349,30 @@ class FlowJourneyRunner(
       )
     }.getOrNull() ?: return ActionResult.Continue
 
+    var shouldHandleGoalHit = true
     runCatching {
       eventService.trackPreparedForTrigger(goalEvent, persistToHistory = true)
     }.onFailure { error ->
       // If the synchronous trigger send fails, fall back to the normal queued path so the
       // backend can still observe the goal hit that caused any immediate conversion.
-      runCatching {
+      val requeued = runCatching {
         eventService.enqueuePreparedEvent(goalEvent, persistToHistory = false)
       }.onFailure { fallbackError ->
         NuxieLogger.warning(
           "FlowJourneyRunner: Failed to requeue goal event after direct send failure: ${fallbackError.message}",
           fallbackError,
         )
-      }
+      }.getOrNull()
       NuxieLogger.warning(
         "FlowJourneyRunner: Failed to track goal event directly: ${error.message}",
         error,
       )
+      if (requeued == false) {
+        shouldHandleGoalHit = false
+        NuxieLogger.warning("FlowJourneyRunner: Dropping goal evaluation because fallback queue rejected the goal hit")
+      }
     }
+    if (!shouldHandleGoalHit) return ActionResult.Continue
     val resolution = onGoalActionHit(goalEvent)
     return when {
       resolution.shouldExit -> ActionResult.Exit(JourneyExitReason.GOAL_MET)

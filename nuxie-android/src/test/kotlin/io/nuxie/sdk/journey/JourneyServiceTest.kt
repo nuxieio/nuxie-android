@@ -543,6 +543,82 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun explicitGoalAction_bufferParticipatesInLaterGoalReevaluationAfterHistoryInsertFails() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "int_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(InteractionAction.Goal(goalId = "signup_complete")),
+          enabled = true,
+        )
+      )
+    )
+    val compositeGoal = GoalConfig(
+      kind = GoalConfig.Kind.ATTRIBUTE,
+      attributeExpr = IREnvelope(
+        irVersion = 1,
+        expr = IRExpr.And(
+          listOf(
+            IRExpr.EventsExists(
+              name = JourneyEvents.journeyGoalHit,
+              whereExpr = IRExpr.PredAnd(
+                listOf(
+                  IRExpr.Pred("eq", "journey_id", IRExpr.JourneyId),
+                  IRExpr.Pred("eq", "goal_id", IRExpr.String("signup_complete")),
+                )
+              ),
+            ),
+            IRExpr.EventsExists(name = "purchase_complete"),
+          )
+        ),
+      ),
+      window = 3600.0,
+    )
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      interactions = interactions,
+      goal = compositeGoal,
+      exitPolicy = null,
+      historyStore = SelectiveFailingInsertHistoryStore(
+        failingEventNames = setOf(JourneyEvents.journeyGoalHit),
+      ),
+    )
+    try {
+      harness.service.initialize()
+
+      val started = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_explicit_buffer_later_eval", name = "paywall_trigger", distinctId = "user_1")
+      ).filterIsInstance<JourneyTriggerResult.Started>().first()
+
+      harness.service.handleRuntimeMessage(
+        journeyId = started.journey.id,
+        type = "runtime/ready",
+        payload = JsonObject(emptyMap()),
+        id = null,
+      )
+      delay(80)
+
+      val afterGoal = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, afterGoal.size)
+      assertEquals(null, afterGoal.first().convertedAtEpochMillis)
+
+      val purchaseEvent = harness.eventService.trackForTrigger(
+        event = "purchase_complete",
+        persistToHistory = true,
+      ).first
+      harness.service.handleEventForTrigger(purchaseEvent)
+      delay(80)
+
+      val active = harness.service.getActiveJourneys("user_1")
+      assertEquals(1, active.size)
+      assertNotNull(active.first().convertedAtEpochMillis)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun completion_emitsJourneyUpdateToBroker() = runBlocking {
     val harness = newHarness(reentry = CampaignReentry.EveryTime)
     try {
