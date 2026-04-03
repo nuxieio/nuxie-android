@@ -18,6 +18,7 @@ import io.nuxie.sdk.ir.IRFeatureQueries
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
+import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.ExperimentAssignment
 import io.nuxie.sdk.network.models.ResponseRecordPayload
@@ -915,7 +916,7 @@ class FlowJourneyRunner(
   private fun hashResponseName(value: String): Int {
     var hash = 0x811c9dc5.toInt()
     for (byte in value.encodeToByteArray()) {
-      hash = hash xor byte.toInt()
+      hash = hash xor (byte.toInt() and 0xff)
       hash *= 0x01000193
     }
     return hash
@@ -985,7 +986,7 @@ class FlowJourneyRunner(
     touchedFieldKey: String? = null,
   ) {
     val runtimeContext = makeResponseRuntimeContext(context)
-    if (!responseContextMatches(runtimeContext, response.responseSchemaId, schemaVersion = null)) {
+    if (!responseContextMatches(runtimeContext, response.responseSchemaId, schemaVersion = response.schemaVersion)) {
       return
     }
 
@@ -1026,22 +1027,24 @@ class FlowJourneyRunner(
       return ActionResult.Continue
     }
 
-    runCatching {
-      apiClient.setResponseField(
-        distinctId = journey.distinctId,
-        journeySessionId = journey.id,
-        responseSchemaId = action.responseSchemaId,
-        schemaVersion = action.schemaVersion,
-        key = action.key,
-        value = resolvedValue,
-      )
-    }.onSuccess { result ->
-      result.response?.let { response ->
-        updateJourneyResponseCache(response)
-        applyResponseRecordToRuntime(response, context, touchedFieldKey = action.key)
+    scope.launch {
+      runCatching {
+        apiClient.setResponseField(
+          distinctId = journey.distinctId,
+          journeySessionId = journey.id,
+          responseSchemaId = action.responseSchemaId,
+          schemaVersion = action.schemaVersion,
+          key = action.key,
+          value = resolvedValue,
+        )
+      }.onSuccess { result ->
+        result.response?.let { response ->
+          updateJourneyResponseCache(response)
+          applyResponseRecordToRuntime(response, context, touchedFieldKey = action.key)
+        }
+      }.onFailure { error ->
+        NuxieLogger.warning("FlowJourneyRunner: set_response_field failed: ${error.message}")
       }
-    }.onFailure { error ->
-      NuxieLogger.warning("FlowJourneyRunner: set_response_field failed: ${error.message}")
     }
 
     return ActionResult.Continue
@@ -1062,6 +1065,7 @@ class FlowJourneyRunner(
         distinctId = journey.distinctId,
         journeySessionId = journey.id,
         responseSchemaId = action.responseSchemaId,
+        schemaVersion = action.schemaVersion,
       )
     }.onSuccess { result ->
       result.response?.let { response ->

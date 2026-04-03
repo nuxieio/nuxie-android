@@ -79,6 +79,8 @@ data class ResponseSubmitRequest(
   val journeySessionId: String,
   @SerialName("response_schema_id")
   val responseSchemaId: String,
+  @SerialName("schema_version")
+  val schemaVersion: Int? = null,
 )
 
 @Serializable

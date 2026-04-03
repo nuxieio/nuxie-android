@@ -57,6 +57,7 @@ interface NuxieApiProtocol {
     distinctId: String,
     journeySessionId: String,
     responseSchemaId: String,
+    schemaVersion: Int? = null,
   ): ResponseSubmitResponse {
     throw UnsupportedOperationException("submitResponse is not implemented")
   }

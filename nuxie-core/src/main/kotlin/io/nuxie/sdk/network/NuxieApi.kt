@@ -195,11 +195,13 @@ class NuxieApi(
     distinctId: String,
     journeySessionId: String,
     responseSchemaId: String,
+    schemaVersion: Int?,
   ): ResponseSubmitResponse {
     val req = ResponseSubmitRequest(
       distinctId = distinctId,
       journeySessionId = journeySessionId,
       responseSchemaId = responseSchemaId,
+      schemaVersion = schemaVersion,
     )
     val body = json.encodeToJsonElement(ResponseSubmitRequest.serializer(), req)
     return request(
