@@ -24,7 +24,6 @@ import io.nuxie.sdk.network.models.ExperimentAssignment
 import io.nuxie.sdk.network.models.ResponseRecordPayload
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
-import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.triggers.JourneyExitReason
 import io.nuxie.sdk.util.fromJsonElement
 import io.nuxie.sdk.util.toJsonElement
