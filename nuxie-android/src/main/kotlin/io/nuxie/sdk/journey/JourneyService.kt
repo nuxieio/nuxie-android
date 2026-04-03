@@ -469,9 +469,9 @@ class JourneyService(
       properties = props,
     )
 
-    runner.abandonResponseDraftsIfNeeded()
     val outcome = runner.dispatchEventTrigger(event)
     handleOutcome(outcome, journey)
+    runner.abandonResponseDraftsIfNeeded()
     dispatchDismissedCallback(
       journeyId = journeyId,
       reason = callbackReason,

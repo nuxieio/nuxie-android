@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
@@ -54,6 +55,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -150,6 +152,10 @@ class FlowJourneyRunner(
   private var isPaused: Boolean = false
   private val debounceJobs: MutableMap<String, Job> = mutableMapOf()
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
+  private val latestResponseWriteSequenceByField: MutableMap<String, Long> = ConcurrentHashMap()
+  private var responseWriteSequenceCounter: Long = 0
+  @Volatile
+  private var latestResponseWriteJob: Job? = null
   private var didWarnConverters: Boolean = false
 
   private companion object {
@@ -959,9 +965,41 @@ class FlowJourneyRunner(
     return true
   }
 
+  private fun responseCacheKey(
+    responseSchemaId: String,
+    schemaVersion: Int,
+  ): String = "$responseSchemaId:$schemaVersion"
+
+  private fun responseWriteFieldKey(
+    responseSchemaId: String,
+    schemaVersion: Int?,
+    fieldKey: String,
+  ): String = "${responseSchemaId}:${schemaVersion ?: "latest"}:$fieldKey"
+
+  private fun nextResponseWriteSequence(fieldKey: String): Long {
+    responseWriteSequenceCounter += 1
+    latestResponseWriteSequenceByField[fieldKey] = responseWriteSequenceCounter
+    return responseWriteSequenceCounter
+  }
+
+  private fun isLatestResponseWrite(fieldKey: String, sequence: Long): Boolean {
+    return latestResponseWriteSequenceByField[fieldKey] == sequence
+  }
+
+  private suspend fun awaitPendingResponseWrites() {
+    latestResponseWriteJob?.let { job ->
+      listOf(job).joinAll()
+    }
+  }
+
   private fun updateJourneyResponseCache(response: ResponseRecordPayload) {
     val existing = (journey.getContextObject("responses")?.toMutableMap() ?: mutableMapOf())
-    existing[response.responseSchemaId] = buildJsonObject(
+    existing[
+      responseCacheKey(
+        responseSchemaId = response.responseSchemaId,
+        schemaVersion = response.schemaVersion,
+      )
+    ] = buildJsonObject(
       "responseId" to JsonPrimitive(response.id),
       "responseSchemaId" to JsonPrimitive(response.responseSchemaId),
       "schemaVersion" to JsonPrimitive(response.schemaVersion),
@@ -1027,7 +1065,15 @@ class FlowJourneyRunner(
       return ActionResult.Continue
     }
 
-    scope.launch {
+    val responseWriteFieldKey = responseWriteFieldKey(
+      responseSchemaId = action.responseSchemaId,
+      schemaVersion = action.schemaVersion,
+      fieldKey = action.key,
+    )
+    val responseWriteSequence = nextResponseWriteSequence(responseWriteFieldKey)
+    val previousWriteJob = latestResponseWriteJob
+    val writeJob = scope.launch {
+      previousWriteJob?.join()
       runCatching {
         apiClient.setResponseField(
           distinctId = journey.distinctId,
@@ -1039,6 +1085,9 @@ class FlowJourneyRunner(
         )
       }.onSuccess { result ->
         result.response?.let { response ->
+          if (!isLatestResponseWrite(responseWriteFieldKey, responseWriteSequence)) {
+            return@let
+          }
           updateJourneyResponseCache(response)
           applyResponseRecordToRuntime(response, context, touchedFieldKey = action.key)
         }
@@ -1046,6 +1095,7 @@ class FlowJourneyRunner(
         NuxieLogger.warning("FlowJourneyRunner: set_response_field failed: ${error.message}")
       }
     }
+    latestResponseWriteJob = writeJob
 
     return ActionResult.Continue
   }
@@ -1059,6 +1109,8 @@ class FlowJourneyRunner(
       NuxieLogger.warning("FlowJourneyRunner: response API unavailable for submit_response")
       return ActionResult.Continue
     }
+
+    awaitPendingResponseWrites()
 
     runCatching {
       apiClient.submitResponse(
@@ -1094,6 +1146,8 @@ class FlowJourneyRunner(
       NuxieLogger.warning("FlowJourneyRunner: response API unavailable for abandon")
       return
     }
+
+    awaitPendingResponseWrites()
 
     runCatching {
       apiClient.abandonResponses(
