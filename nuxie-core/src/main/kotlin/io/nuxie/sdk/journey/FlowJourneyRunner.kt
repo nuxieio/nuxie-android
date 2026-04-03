@@ -154,6 +154,7 @@ class FlowJourneyRunner(
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
   private val latestResponseWriteSequenceByField: MutableMap<String, Long> = ConcurrentHashMap()
   private var responseWriteSequenceCounter: Long = 0
+  private var didAttemptResponseDraftWrite: Boolean = false
   @Volatile
   private var latestResponseWriteJob: Job? = null
   private var didWarnConverters: Boolean = false
@@ -1065,6 +1066,8 @@ class FlowJourneyRunner(
       return ActionResult.Continue
     }
 
+    didAttemptResponseDraftWrite = true
+
     val responseWriteFieldKey = responseWriteFieldKey(
       responseSchemaId = action.responseSchemaId,
       schemaVersion = action.schemaVersion,
@@ -1132,14 +1135,16 @@ class FlowJourneyRunner(
   }
 
   suspend fun abandonResponseDraftsIfNeeded() {
-    val responses = journey.getContextObject("responses") ?: return
-    val hasDrafts = responses.values.any { value ->
+    awaitPendingResponseWrites()
+
+    val responses = journey.getContextObject("responses")
+    val hasDrafts = responses?.values?.any { value ->
       val response = value as? JsonObject ?: return@any false
       val state = (response["state"] as? JsonPrimitive)?.contentOrNull ?: return@any false
       val values = response["values"] as? JsonObject ?: return@any false
       state == "draft" && values.isNotEmpty()
-    }
-    if (!hasDrafts) return
+    } ?: false
+    if (!hasDrafts && !didAttemptResponseDraftWrite) return
 
     val apiClient = api
     if (apiClient == null) {
@@ -1147,14 +1152,13 @@ class FlowJourneyRunner(
       return
     }
 
-    awaitPendingResponseWrites()
-
     runCatching {
       apiClient.abandonResponses(
         distinctId = journey.distinctId,
         journeySessionId = journey.id,
       )
     }.onSuccess { result ->
+      didAttemptResponseDraftWrite = false
       result.responses.forEach { response ->
         updateJourneyResponseCache(response)
         applyResponseRecordToRuntime(
