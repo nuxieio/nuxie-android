@@ -18,10 +18,12 @@ import io.nuxie.sdk.ir.IRFeatureQueries
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
+import io.nuxie.sdk.logging.NuxieLogger
+import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.ExperimentAssignment
+import io.nuxie.sdk.network.models.ResponseRecordPayload
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
-import io.nuxie.sdk.logging.NuxieLogger
 import io.nuxie.sdk.triggers.JourneyExitReason
 import io.nuxie.sdk.util.fromJsonElement
 import io.nuxie.sdk.util.toJsonElement
@@ -29,6 +31,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
@@ -51,6 +54,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -100,6 +104,7 @@ class FlowJourneyRunner(
   private val segmentService: SegmentService,
   private val featureService: FeatureService,
   private val profileService: ProfileService,
+  private val api: NuxieApiProtocol? = null,
   private val irRuntime: IRRuntime,
   private val scope: CoroutineScope,
   private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
@@ -124,6 +129,17 @@ class FlowJourneyRunner(
     val event: NuxieEvent?,
   )
 
+  private data class ResponseRuntimeContext(
+    val screenId: String?,
+    val instanceId: String?,
+    val schemaId: String?,
+    val schemaVersion: Int?,
+    val state: String?,
+    val schemaIdPath: VmPathRef,
+    val schemaVersionPath: VmPathRef,
+    val statePath: VmPathRef,
+  )
+
   private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
   private val viewModels = FlowViewModelRuntime(flow.remoteFlow)
   private val interactionsById: Map<String, List<Interaction>> = flow.remoteFlow.interactions
@@ -135,11 +151,19 @@ class FlowJourneyRunner(
   private var isPaused: Boolean = false
   private val debounceJobs: MutableMap<String, Job> = mutableMapOf()
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
+  private val latestResponseWriteSequenceByField: MutableMap<String, Long> = ConcurrentHashMap()
+  private var responseWriteSequenceCounter: Long = 0
+  private var didAttemptResponseDraftWrite: Boolean = false
+  @Volatile
+  private var latestResponseWriteJob: Job? = null
   private var didWarnConverters: Boolean = false
 
   private companion object {
     const val GLOBAL_INTERACTIONS_KEY: String = "__global__"
     const val CURRENT_DEVICE_TIMEZONE_TOKEN: String = "__current_device__"
+    const val RESPONSE_ROOT_VIEW_MODEL: String = "vm"
+    const val RESPONSE_ROOT_PROPERTY: String = "response"
+    const val RESPONSE_VALUES_PROPERTY: String = "values"
   }
 
   val isRuntimeReady: Boolean
@@ -501,6 +525,16 @@ class FlowJourneyRunner(
           handleUpdateCustomer(action, context)
           trackAction(action, context, error = null)
           ActionResult.Continue
+        }
+        is InteractionAction.SetResponseField -> {
+          val result = handleSetResponseField(action, context)
+          trackAction(action, context, error = null)
+          result
+        }
+        is InteractionAction.SubmitResponse -> {
+          val result = handleSubmitResponse(action, context)
+          trackAction(action, context, error = null)
+          result
         }
         is InteractionAction.Purchase -> {
           val result = handlePurchase(action, context)
@@ -878,6 +912,267 @@ class FlowJourneyRunner(
         attributesUpdated = attributes.keys.toList(),
       )
     )
+  }
+
+  private fun responsePath(vararg segments: String): VmPathRef {
+    val ids = listOf(RESPONSE_ROOT_VIEW_MODEL, *segments).map(::hashResponseName)
+    return VmPathRef(pathIds = ids, nameBased = true)
+  }
+
+  private fun hashResponseName(value: String): Int {
+    var hash = 0x811c9dc5.toInt()
+    for (byte in value.encodeToByteArray()) {
+      hash = hash xor (byte.toInt() and 0xff)
+      hash *= 0x01000193
+    }
+    return hash
+  }
+
+  private fun makeResponseRuntimeContext(context: RuntimeTriggerContext): ResponseRuntimeContext {
+    val screenId = context.screenId ?: journey.flowState.currentScreenId
+    val instanceId = context.instanceId
+    val schemaIdPath = responsePath(RESPONSE_ROOT_PROPERTY, "schemaId")
+    val schemaVersionPath = responsePath(RESPONSE_ROOT_PROPERTY, "schemaVersion")
+    val statePath = responsePath(RESPONSE_ROOT_PROPERTY, "state")
+
+    return ResponseRuntimeContext(
+      screenId = screenId,
+      instanceId = instanceId,
+      schemaId = (viewModels.getValue(schemaIdPath, screenId, instanceId) as? JsonPrimitive)?.contentOrNull
+        ?: viewModels.getValue(schemaIdPath, screenId, instanceId) as? String,
+      schemaVersion = when (val raw = viewModels.getValue(schemaVersionPath, screenId, instanceId)) {
+        is Number -> raw.toInt()
+        is JsonPrimitive -> raw.intOrNull
+        else -> null
+      },
+      state = (viewModels.getValue(statePath, screenId, instanceId) as? JsonPrimitive)?.contentOrNull
+        ?: viewModels.getValue(statePath, screenId, instanceId) as? String,
+      schemaIdPath = schemaIdPath,
+      schemaVersionPath = schemaVersionPath,
+      statePath = statePath,
+    )
+  }
+
+  private fun responseContextMatches(
+    runtimeContext: ResponseRuntimeContext,
+    responseSchemaId: String,
+    schemaVersion: Int?,
+  ): Boolean {
+    if (runtimeContext.schemaId != responseSchemaId) return false
+    if (schemaVersion != null && runtimeContext.schemaVersion != null && runtimeContext.schemaVersion != schemaVersion) {
+      return false
+    }
+    return true
+  }
+
+  private fun responseCacheKey(
+    responseSchemaId: String,
+    schemaVersion: Int,
+  ): String = "$responseSchemaId:$schemaVersion"
+
+  private fun responseWriteFieldKey(
+    responseSchemaId: String,
+    schemaVersion: Int?,
+    fieldKey: String,
+  ): String = "${responseSchemaId}:${schemaVersion ?: "latest"}:$fieldKey"
+
+  private fun nextResponseWriteSequence(fieldKey: String): Long {
+    responseWriteSequenceCounter += 1
+    latestResponseWriteSequenceByField[fieldKey] = responseWriteSequenceCounter
+    return responseWriteSequenceCounter
+  }
+
+  private fun isLatestResponseWrite(fieldKey: String, sequence: Long): Boolean {
+    return latestResponseWriteSequenceByField[fieldKey] == sequence
+  }
+
+  private suspend fun awaitPendingResponseWrites() {
+    latestResponseWriteJob?.let { job ->
+      listOf(job).joinAll()
+    }
+  }
+
+  private fun updateJourneyResponseCache(response: ResponseRecordPayload) {
+    val existing = (journey.getContextObject("responses")?.toMutableMap() ?: mutableMapOf())
+    existing[
+      responseCacheKey(
+        responseSchemaId = response.responseSchemaId,
+        schemaVersion = response.schemaVersion,
+      )
+    ] = buildJsonObject(
+      "responseId" to JsonPrimitive(response.id),
+      "responseSchemaId" to JsonPrimitive(response.responseSchemaId),
+      "schemaVersion" to JsonPrimitive(response.schemaVersion),
+      "state" to JsonPrimitive(response.state),
+      "values" to response.values,
+    )
+    journey.setContextJson("responses", JsonObject(existing))
+  }
+
+  private fun applyResponseRuntimeValuePatch(
+    path: VmPathRef,
+    value: JsonElement,
+    context: ResponseRuntimeContext,
+  ) {
+    viewModels.setValue(path, value, context.screenId, context.instanceId)
+    sendViewModelPatch(path, value, source = "host", instanceId = context.instanceId)
+  }
+
+  private fun applyResponseRecordToRuntime(
+    response: ResponseRecordPayload,
+    context: RuntimeTriggerContext,
+    touchedFieldKey: String? = null,
+  ) {
+    val runtimeContext = makeResponseRuntimeContext(context)
+    if (!responseContextMatches(runtimeContext, response.responseSchemaId, schemaVersion = response.schemaVersion)) {
+      return
+    }
+
+    applyResponseRuntimeValuePatch(runtimeContext.statePath, JsonPrimitive(response.state), runtimeContext)
+    applyResponseRuntimeValuePatch(runtimeContext.schemaVersionPath, JsonPrimitive(response.schemaVersion), runtimeContext)
+    if (touchedFieldKey != null) {
+      val fieldValue = response.values[touchedFieldKey]
+      if (fieldValue != null) {
+        applyResponseRuntimeValuePatch(
+          responsePath(RESPONSE_ROOT_PROPERTY, RESPONSE_VALUES_PROPERTY, touchedFieldKey),
+          fieldValue,
+          runtimeContext,
+        )
+      }
+    }
+    journey.flowState.viewModelSnapshot = viewModels.getSnapshot()
+  }
+
+  private suspend fun handleSetResponseField(
+    action: InteractionAction.SetResponseField,
+    context: RuntimeTriggerContext,
+  ): ActionResult {
+    val resolvedValue = resolveToJsonElement(action.value, context)
+    val runtimeContext = makeResponseRuntimeContext(context)
+    if (responseContextMatches(runtimeContext, action.responseSchemaId, action.schemaVersion)) {
+      applyResponseRuntimeValuePatch(
+        responsePath(RESPONSE_ROOT_PROPERTY, RESPONSE_VALUES_PROPERTY, action.key),
+        resolvedValue,
+        runtimeContext,
+      )
+      applyResponseRuntimeValuePatch(runtimeContext.statePath, JsonPrimitive("draft"), runtimeContext)
+      journey.flowState.viewModelSnapshot = viewModels.getSnapshot()
+    }
+
+    val apiClient = api
+    if (apiClient == null) {
+      NuxieLogger.warning("FlowJourneyRunner: response API unavailable for set_response_field")
+      return ActionResult.Continue
+    }
+
+    didAttemptResponseDraftWrite = true
+
+    val responseWriteFieldKey = responseWriteFieldKey(
+      responseSchemaId = action.responseSchemaId,
+      schemaVersion = action.schemaVersion,
+      fieldKey = action.key,
+    )
+    val responseWriteSequence = nextResponseWriteSequence(responseWriteFieldKey)
+    val previousWriteJob = latestResponseWriteJob
+    val writeJob = scope.launch {
+      previousWriteJob?.join()
+      runCatching {
+        apiClient.setResponseField(
+          distinctId = journey.distinctId,
+          journeySessionId = journey.id,
+          responseSchemaId = action.responseSchemaId,
+          schemaVersion = action.schemaVersion,
+          key = action.key,
+          value = resolvedValue,
+        )
+      }.onSuccess { result ->
+        result.response?.let { response ->
+          if (!isLatestResponseWrite(responseWriteFieldKey, responseWriteSequence)) {
+            return@let
+          }
+          updateJourneyResponseCache(response)
+          applyResponseRecordToRuntime(response, context, touchedFieldKey = action.key)
+        }
+      }.onFailure { error ->
+        NuxieLogger.warning("FlowJourneyRunner: set_response_field failed: ${error.message}")
+      }
+    }
+    latestResponseWriteJob = writeJob
+
+    return ActionResult.Continue
+  }
+
+  private suspend fun handleSubmitResponse(
+    action: InteractionAction.SubmitResponse,
+    context: RuntimeTriggerContext,
+  ): ActionResult {
+    val apiClient = api
+    if (apiClient == null) {
+      NuxieLogger.warning("FlowJourneyRunner: response API unavailable for submit_response")
+      return ActionResult.Continue
+    }
+
+    awaitPendingResponseWrites()
+
+    runCatching {
+      apiClient.submitResponse(
+        distinctId = journey.distinctId,
+        journeySessionId = journey.id,
+        responseSchemaId = action.responseSchemaId,
+        schemaVersion = action.schemaVersion,
+      )
+    }.onSuccess { result ->
+      result.response?.let { response ->
+        updateJourneyResponseCache(response)
+        applyResponseRecordToRuntime(response, context)
+      }
+    }.onFailure { error ->
+      NuxieLogger.warning("FlowJourneyRunner: submit_response failed: ${error.message}")
+    }
+
+    return ActionResult.Continue
+  }
+
+  suspend fun abandonResponseDraftsIfNeeded() {
+    awaitPendingResponseWrites()
+
+    val responses = journey.getContextObject("responses")
+    val hasDrafts = responses?.values?.any { value ->
+      val response = value as? JsonObject ?: return@any false
+      val state = (response["state"] as? JsonPrimitive)?.contentOrNull ?: return@any false
+      val values = response["values"] as? JsonObject ?: return@any false
+      state == "draft" && values.isNotEmpty()
+    } ?: false
+    if (!hasDrafts && !didAttemptResponseDraftWrite) return
+
+    val apiClient = api
+    if (apiClient == null) {
+      NuxieLogger.warning("FlowJourneyRunner: response API unavailable for abandon")
+      return
+    }
+
+    runCatching {
+      apiClient.abandonResponses(
+        distinctId = journey.distinctId,
+        journeySessionId = journey.id,
+      )
+    }.onSuccess { result ->
+      didAttemptResponseDraftWrite = false
+      result.responses.forEach { response ->
+        updateJourneyResponseCache(response)
+        applyResponseRecordToRuntime(
+          response,
+          RuntimeTriggerContext(
+            screenId = journey.flowState.currentScreenId,
+            componentId = null,
+            interactionId = null,
+            instanceId = null,
+          ),
+        )
+      }
+    }.onFailure { error ->
+      NuxieLogger.warning("FlowJourneyRunner: abandon responses failed: ${error.message}")
+    }
   }
 
   private fun handleCallDelegate(action: InteractionAction.CallDelegate, context: RuntimeTriggerContext) {
@@ -1710,6 +2005,8 @@ private val InteractionAction.actionType: String
     is InteractionAction.Goal -> "goal"
     is InteractionAction.SendEvent -> "send_event"
     is InteractionAction.UpdateCustomer -> "update_customer"
+    is InteractionAction.SetResponseField -> "set_response_field"
+    is InteractionAction.SubmitResponse -> "submit_response"
     is InteractionAction.Purchase -> "purchase"
     is InteractionAction.Restore -> "restore"
     is InteractionAction.RequestNotifications -> "request_notifications"

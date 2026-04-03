@@ -11,6 +11,12 @@ import io.nuxie.sdk.network.models.EventResponse
 import io.nuxie.sdk.network.models.FeatureCheckRequest
 import io.nuxie.sdk.network.models.ProfileRequest
 import io.nuxie.sdk.network.models.ProfileResponse
+import io.nuxie.sdk.network.models.ResponseAbandonRequest
+import io.nuxie.sdk.network.models.ResponseAbandonResponse
+import io.nuxie.sdk.network.models.ResponseFieldRequest
+import io.nuxie.sdk.network.models.ResponseSubmitRequest
+import io.nuxie.sdk.network.models.ResponseSubmitResponse
+import io.nuxie.sdk.network.models.ResponseWriteResponse
 import io.nuxie.sdk.util.Iso8601
 import io.nuxie.sdk.util.UuidV7
 import kotlinx.coroutines.Dispatchers
@@ -154,6 +160,69 @@ class NuxieApi(
     val body = json.encodeToJsonElement(FeatureCheckRequest.serializer(), req)
     return request(
       path = "/entitled",
+      method = "POST",
+      auth = AuthMethod.API_KEY_IN_BODY,
+      body = body,
+    )
+  }
+
+  override suspend fun setResponseField(
+    distinctId: String,
+    journeySessionId: String,
+    responseSchemaId: String,
+    schemaVersion: Int?,
+    key: String,
+    value: JsonElement,
+  ): ResponseWriteResponse {
+    val req = ResponseFieldRequest(
+      distinctId = distinctId,
+      journeySessionId = journeySessionId,
+      responseSchemaId = responseSchemaId,
+      schemaVersion = schemaVersion,
+      key = key,
+      value = value,
+    )
+    val body = json.encodeToJsonElement(ResponseFieldRequest.serializer(), req)
+    return request(
+      path = "/response/field",
+      method = "POST",
+      auth = AuthMethod.API_KEY_IN_BODY,
+      body = body,
+    )
+  }
+
+  override suspend fun submitResponse(
+    distinctId: String,
+    journeySessionId: String,
+    responseSchemaId: String,
+    schemaVersion: Int?,
+  ): ResponseSubmitResponse {
+    val req = ResponseSubmitRequest(
+      distinctId = distinctId,
+      journeySessionId = journeySessionId,
+      responseSchemaId = responseSchemaId,
+      schemaVersion = schemaVersion,
+    )
+    val body = json.encodeToJsonElement(ResponseSubmitRequest.serializer(), req)
+    return request(
+      path = "/response/submit",
+      method = "POST",
+      auth = AuthMethod.API_KEY_IN_BODY,
+      body = body,
+    )
+  }
+
+  override suspend fun abandonResponses(
+    distinctId: String,
+    journeySessionId: String,
+  ): ResponseAbandonResponse {
+    val req = ResponseAbandonRequest(
+      distinctId = distinctId,
+      journeySessionId = journeySessionId,
+    )
+    val body = json.encodeToJsonElement(ResponseAbandonRequest.serializer(), req)
+    return request(
+      path = "/response/abandon",
       method = "POST",
       auth = AuthMethod.API_KEY_IN_BODY,
       body = body,
