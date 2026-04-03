@@ -2,6 +2,7 @@ package io.nuxie.sdk.network.models
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 @Serializable
@@ -54,4 +55,36 @@ data class FeatureCheckRequest(
   val featureId: String,
   val requiredBalance: Int? = null,
   val entityId: String? = null,
+)
+
+@Serializable
+data class ResponseFieldRequest(
+  @SerialName("distinct_id")
+  val distinctId: String,
+  @SerialName("journey_session_id")
+  val journeySessionId: String,
+  @SerialName("response_schema_id")
+  val responseSchemaId: String,
+  @SerialName("schema_version")
+  val schemaVersion: Int? = null,
+  val key: String,
+  val value: JsonElement,
+)
+
+@Serializable
+data class ResponseSubmitRequest(
+  @SerialName("distinct_id")
+  val distinctId: String,
+  @SerialName("journey_session_id")
+  val journeySessionId: String,
+  @SerialName("response_schema_id")
+  val responseSchemaId: String,
+)
+
+@Serializable
+data class ResponseAbandonRequest(
+  @SerialName("distinct_id")
+  val distinctId: String,
+  @SerialName("journey_session_id")
+  val journeySessionId: String,
 )

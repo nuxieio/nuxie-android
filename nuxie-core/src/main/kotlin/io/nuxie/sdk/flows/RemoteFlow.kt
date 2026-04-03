@@ -330,6 +330,20 @@ sealed interface InteractionAction {
   ) : InteractionAction
 
   @Serializable
+  data class SetResponseField(
+    val responseSchemaId: String,
+    val schemaVersion: Int? = null,
+    val key: String,
+    val value: JsonElement,
+  ) : InteractionAction
+
+  @Serializable
+  data class SubmitResponse(
+    val responseSchemaId: String,
+    val schemaVersion: Int? = null,
+  ) : InteractionAction
+
+  @Serializable
   data class Purchase(
     val placementIndex: JsonElement,
     val productId: JsonElement,
@@ -451,6 +465,8 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       "goal" -> input.json.decodeFromJsonElement(InteractionAction.Goal.serializer(), el)
       "send_event" -> input.json.decodeFromJsonElement(InteractionAction.SendEvent.serializer(), el)
       "update_customer" -> input.json.decodeFromJsonElement(InteractionAction.UpdateCustomer.serializer(), el)
+      "set_response_field" -> input.json.decodeFromJsonElement(InteractionAction.SetResponseField.serializer(), el)
+      "submit_response" -> input.json.decodeFromJsonElement(InteractionAction.SubmitResponse.serializer(), el)
       "purchase" -> input.json.decodeFromJsonElement(InteractionAction.Purchase.serializer(), el)
       "restore" -> InteractionAction.Restore
       "request_notifications" -> InteractionAction.RequestNotifications
@@ -540,6 +556,16 @@ object InteractionActionSerializer : kotlinx.serialization.KSerializer<Interacti
       }
       is InteractionAction.UpdateCustomer -> encodeWithType("update_customer") {
         put("attributes", output.json.encodeToJsonElement(MapSerializer(String.serializer(), JsonElement.serializer()), value.attributes))
+      }
+      is InteractionAction.SetResponseField -> encodeWithType("set_response_field") {
+        put("responseSchemaId", value.responseSchemaId)
+        if (value.schemaVersion != null) put("schemaVersion", value.schemaVersion)
+        put("key", value.key)
+        put("value", value.value)
+      }
+      is InteractionAction.SubmitResponse -> encodeWithType("submit_response") {
+        put("responseSchemaId", value.responseSchemaId)
+        if (value.schemaVersion != null) put("schemaVersion", value.schemaVersion)
       }
       is InteractionAction.Purchase -> encodeWithType("purchase") {
         put("placementIndex", value.placementIndex)

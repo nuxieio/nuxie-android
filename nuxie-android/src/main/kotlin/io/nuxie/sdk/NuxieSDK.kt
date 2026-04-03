@@ -312,6 +312,7 @@ class NuxieSDK private constructor() {
       segmentService = segments,
       featureService = features,
       flowService = flows,
+      api = requireNotNull(api),
       journeyStore = FileJourneyStore(File(profileBaseDir, "journeys")),
       triggerBroker = broker,
       irRuntime = runtime,

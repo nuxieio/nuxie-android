@@ -6,7 +6,11 @@ import io.nuxie.sdk.network.models.BatchRequest
 import io.nuxie.sdk.network.models.BatchResponse
 import io.nuxie.sdk.network.models.EventResponse
 import io.nuxie.sdk.network.models.ProfileResponse
+import io.nuxie.sdk.network.models.ResponseAbandonResponse
+import io.nuxie.sdk.network.models.ResponseSubmitResponse
+import io.nuxie.sdk.network.models.ResponseWriteResponse
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 
 /**
  * Lightweight interface for the Nuxie HTTP client.
@@ -37,4 +41,30 @@ interface NuxieApiProtocol {
     requiredBalance: Int? = null,
     entityId: String? = null,
   ): FeatureCheckResult
+
+  suspend fun setResponseField(
+    distinctId: String,
+    journeySessionId: String,
+    responseSchemaId: String,
+    schemaVersion: Int? = null,
+    key: String,
+    value: JsonElement,
+  ): ResponseWriteResponse {
+    throw UnsupportedOperationException("setResponseField is not implemented")
+  }
+
+  suspend fun submitResponse(
+    distinctId: String,
+    journeySessionId: String,
+    responseSchemaId: String,
+  ): ResponseSubmitResponse {
+    throw UnsupportedOperationException("submitResponse is not implemented")
+  }
+
+  suspend fun abandonResponses(
+    distinctId: String,
+    journeySessionId: String,
+  ): ResponseAbandonResponse {
+    throw UnsupportedOperationException("abandonResponses is not implemented")
+  }
 }

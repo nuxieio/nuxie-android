@@ -27,6 +27,7 @@ import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.ir.IRSegmentQueries
 import io.nuxie.sdk.ir.IRUserProps
 import io.nuxie.sdk.logging.NuxieLogger
+import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.ActiveJourney
 import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
@@ -74,6 +75,7 @@ class JourneyService(
   private val segmentService: SegmentService,
   private val featureService: FeatureService,
   private val flowService: FlowService,
+  private val api: NuxieApiProtocol? = null,
   private val journeyStore: JourneyStore,
   private val triggerBroker: TriggerBroker = DefaultTriggerBroker(),
   private val irRuntime: IRRuntime = IRRuntime(),
@@ -467,6 +469,7 @@ class JourneyService(
       properties = props,
     )
 
+    runner.abandonResponseDraftsIfNeeded()
     val outcome = runner.dispatchEventTrigger(event)
     handleOutcome(outcome, journey)
     dispatchDismissedCallback(
@@ -976,6 +979,7 @@ class JourneyService(
       segmentService = segmentService,
       featureService = featureService,
       profileService = profileService,
+      api = api,
       irRuntime = irRuntime,
       scope = scope,
       nowEpochMillis = nowEpochMillis,

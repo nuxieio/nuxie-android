@@ -135,3 +135,58 @@ data class ApiErrorResponse(
   val code: String? = null,
   val details: JsonObject? = null,
 )
+
+@Serializable
+data class ResponseRecordPayload(
+  val id: String,
+  val campaignId: String,
+  val journeySessionId: String,
+  val customerId: String,
+  val responseSchemaId: String,
+  val responseSchemaVersionId: String,
+  val schemaVersion: Int,
+  val state: String,
+  val values: JsonObject,
+  val createdAt: String,
+  val updatedAt: String,
+  val submittedAt: String? = null,
+  val abandonedAt: String? = null,
+)
+
+@Serializable
+data class ResponseSchemaFieldPayload(
+  val key: String,
+  val type: String,
+  val options: List<String>? = null,
+  val min: Double? = null,
+  val max: Double? = null,
+)
+
+@Serializable
+data class ResponseSchemaVersionPayload(
+  val id: String,
+  val responseSchemaId: String,
+  val versionSeq: Int,
+  val fields: List<ResponseSchemaFieldPayload>,
+  val createdAt: String,
+  val updatedAt: String,
+)
+
+@Serializable
+data class ResponseWriteResponse(
+  val status: String,
+  val response: ResponseRecordPayload? = null,
+  val version: ResponseSchemaVersionPayload? = null,
+)
+
+@Serializable
+data class ResponseSubmitResponse(
+  val status: String,
+  val response: ResponseRecordPayload? = null,
+)
+
+@Serializable
+data class ResponseAbandonResponse(
+  val status: String,
+  val responses: List<ResponseRecordPayload> = emptyList(),
+)
