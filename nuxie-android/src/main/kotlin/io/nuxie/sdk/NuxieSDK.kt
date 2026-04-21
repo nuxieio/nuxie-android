@@ -556,15 +556,15 @@ class NuxieSDK private constructor() {
       }
     }
 
-    fun shouldComplete(update: TriggerUpdate, mode: TriggerMode): Boolean {
+    fun shouldComplete(update: TriggerUpdate, mode: TriggerMode, hasGatePlan: Boolean): Boolean {
       return when (update) {
         is TriggerUpdate.Error -> true
         is TriggerUpdate.Decision -> when (update.decision) {
           TriggerDecision.AllowedImmediate,
           TriggerDecision.DeniedImmediate,
           TriggerDecision.NoMatch,
-          is TriggerDecision.Suppressed,
           -> true
+          is TriggerDecision.Suppressed -> !hasGatePlan
           else -> false
         }
         is TriggerUpdate.Entitlement -> when (update.entitlement) {
@@ -620,7 +620,7 @@ class NuxieSDK private constructor() {
         if (broker != null && handler != null) {
           broker.register(eventId) { update ->
             emitMain(update)
-            if (shouldComplete(update, triggerMode)) {
+            if (shouldComplete(update, triggerMode, gatePlan != null)) {
               broker.complete(eventId)
             }
           }
@@ -648,10 +648,7 @@ class NuxieSDK private constructor() {
           }
         }
 
-        if (emittedJourneyDecision) {
-          if (triggerMode != TriggerMode.FLOW) {
-            broker?.complete(eventId)
-          }
+        if (emittedJourneyDecision && gatePlan == null) {
           return@launch
         }
 

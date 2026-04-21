@@ -285,6 +285,7 @@ class JourneyServiceTest {
       assertTrue(harness.presented.isEmpty())
       assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
       assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
+      assertTrue(harness.eventService.getEventsForUser("user_1").none { it.name == "\$journey_start" })
     } finally {
       harness.close()
     }
