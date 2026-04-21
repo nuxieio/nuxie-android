@@ -56,6 +56,7 @@ import io.nuxie.sdk.triggers.TriggerUpdate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -284,6 +285,38 @@ class JourneyServiceTest {
       assertTrue(harness.presented.isEmpty())
       assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
       assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun handleEventForTrigger_suppressesConcurrentStartWhileStartPersistenceIsInFlight() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      trackDelayMillis = 250,
+    )
+    try {
+      harness.service.initialize()
+      val first = async {
+        harness.service.handleEventForTrigger(
+          NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
+        )
+      }
+
+      delay(50)
+      val secondResults = harness.service.handleEventForTrigger(
+        NuxieEvent(id = "evt_2", name = "paywall_trigger", distinctId = "user_1")
+      )
+      val firstResults = first.await()
+
+      assertEquals(1, firstResults.filterIsInstance<JourneyTriggerResult.Started>().size)
+      val suppressed = secondResults.filterIsInstance<JourneyTriggerResult.Suppressed>().firstOrNull()
+      assertNotNull(suppressed)
+      assertEquals(SuppressReason.AlreadyActive, suppressed?.reason)
+      assertEquals(1, harness.service.getActiveJourneys("user_1").size)
+      assertEquals(1, harness.presented.size)
+      assertEquals(1, harness.api.trackedEvents.count { it.event == "\$journey_start" })
     } finally {
       harness.close()
     }

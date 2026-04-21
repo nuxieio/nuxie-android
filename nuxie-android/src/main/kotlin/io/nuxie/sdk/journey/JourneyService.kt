@@ -888,6 +888,7 @@ class JourneyService(
     if (!originEventId.isNullOrBlank()) {
       journey.setContext("_origin_event_id", originEventId)
     }
+    inMemoryJourneysById[journey.id] = journey
 
     val flow = runCatching { flowService.fetchFlow(campaign.flowId) }.getOrNull()
     val entryScreenId = flow?.remoteFlow?.screens?.firstOrNull()?.id
@@ -903,11 +904,11 @@ class JourneyService(
         )
       )
     } catch (error: Throwable) {
+      inMemoryJourneysById.remove(journey.id)
       NuxieLogger.warning("JourneyService: Failed to persist journey start: ${error.message}", error)
       return null
     }
 
-    inMemoryJourneysById[journey.id] = journey
     persistJourney(journey)
 
     eventService.track(

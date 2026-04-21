@@ -649,6 +649,9 @@ class NuxieSDK private constructor() {
         }
 
         if (emittedJourneyDecision) {
+          if (triggerMode != TriggerMode.FLOW) {
+            broker?.complete(eventId)
+          }
           return@launch
         }
 
