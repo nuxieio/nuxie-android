@@ -342,6 +342,7 @@ class FlowJourneyRunnerTest {
       settle()
 
       val message = harness.host.runtimeMessages.first { it.type == "runtime/view_model_init" }
+      assertEquals(JsonPrimitive(2), message.payload["schemaVersion"])
 
       val schema = message.payload["schema"] as? JsonObject
       val state = message.payload["state"] as? JsonObject
@@ -349,7 +350,6 @@ class FlowJourneyRunnerTest {
       assertNotNull(state)
       assertNull(message.payload["viewModels"])
       assertNull(message.payload["instances"])
-      assertNull(message.payload["schemaVersion"])
 
       val viewModels = schema!!["viewModels"] as? JsonArray
       val converters = schema["converters"] as? JsonObject

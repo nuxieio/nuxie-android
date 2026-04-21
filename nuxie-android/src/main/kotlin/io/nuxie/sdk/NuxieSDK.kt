@@ -75,6 +75,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Android entrypoint.
@@ -556,7 +557,12 @@ class NuxieSDK private constructor() {
       }
     }
 
-    fun shouldComplete(update: TriggerUpdate, mode: TriggerMode, hasGatePlan: Boolean): Boolean {
+    fun shouldComplete(
+      update: TriggerUpdate,
+      mode: TriggerMode,
+      hasGatePlan: Boolean,
+      startedJourney: Boolean,
+    ): Boolean {
       return when (update) {
         is TriggerUpdate.Error -> true
         is TriggerUpdate.Decision -> when (update.decision) {
@@ -565,7 +571,7 @@ class NuxieSDK private constructor() {
           TriggerDecision.NoMatch,
           -> true
           is TriggerDecision.Suppressed -> !hasGatePlan
-          is TriggerDecision.FlowShown -> mode == TriggerMode.FLOW
+          is TriggerDecision.FlowShown -> mode == TriggerMode.FLOW && !startedJourney
           else -> false
         }
         is TriggerUpdate.Entitlement -> when (update.entitlement) {
@@ -618,10 +624,11 @@ class NuxieSDK private constructor() {
           }
         }
 
+        val startedJourney = AtomicBoolean(false)
         if (broker != null && handler != null) {
           broker.register(eventId) { update ->
             emitMain(update)
-            if (shouldComplete(update, triggerMode, gatePlan != null)) {
+            if (shouldComplete(update, triggerMode, gatePlan != null, startedJourney.get())) {
               broker.complete(eventId)
             }
           }
@@ -633,6 +640,7 @@ class NuxieSDK private constructor() {
           for (result in journeyResults) {
             when (result) {
               is JourneyTriggerResult.Started -> {
+                startedJourney.set(true)
                 emittedJourneyDecision = true
                 val ref = JourneyRef(
                   journeyId = result.journey.id,

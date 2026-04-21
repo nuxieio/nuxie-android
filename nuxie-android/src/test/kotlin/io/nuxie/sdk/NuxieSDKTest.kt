@@ -23,6 +23,7 @@ import io.nuxie.sdk.flows.BuildManifest
 import io.nuxie.sdk.flows.BuildManifestFile
 import io.nuxie.sdk.flows.FlowBundleRef
 import io.nuxie.sdk.flows.FlowService
+import io.nuxie.sdk.flows.CloseReason
 import io.nuxie.sdk.flows.RemoteFlow
 import io.nuxie.sdk.flows.RemoteFlowScreen
 import io.nuxie.sdk.flows.ViewModel
@@ -57,6 +58,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Test
@@ -200,6 +202,7 @@ class NuxieSDKTest {
     val scope: CoroutineScope,
     val api: FakeApi,
     val broker: DefaultTriggerBroker,
+    val journeyService: JourneyService,
     val closeActivity: () -> Unit,
   ) {
     suspend fun close() {
@@ -273,6 +276,37 @@ class NuxieSDKTest {
       assertTrue(updates.any { it.decisionOrNull() == TriggerDecision.Suppressed(SuppressReason.AlreadyActive) })
       assertTrue(updates.any { it.decisionOrNull() is TriggerDecision.FlowShown })
       assertTrue(updates.none { it.decisionOrNull() == TriggerDecision.NoMatch })
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun trigger_keepsStartedJourneyShowFlowGateOpenForJourneyUpdate() = runBlocking {
+    val harness = newHarness()
+    try {
+      harness.api.gatePayload = FakeApi.showFlowGatePayload("standalone_flow")
+      val updates = mutableListOf<TriggerUpdate>()
+
+      harness.sdk.trigger("paywall_trigger") { update ->
+        updates += update
+      }
+
+      waitForTrigger {
+        updates.any { it.decisionOrNull() is TriggerDecision.JourneyStarted } &&
+          updates.any { it.decisionOrNull() is TriggerDecision.FlowShown }
+      }
+      val started = updates
+        .mapNotNull { it.decisionOrNull() as? TriggerDecision.JourneyStarted }
+        .firstOrNull()
+      assertNotNull(started)
+
+      harness.journeyService.handleRuntimeDismiss(started!!.ref.journeyId, CloseReason.UserDismissed)
+      waitForTrigger {
+        updates.any { it is TriggerUpdate.Journey }
+      }
+
+      assertTrue(updates.any { it is TriggerUpdate.Journey })
     } finally {
       harness.close()
     }
@@ -395,6 +429,7 @@ class NuxieSDKTest {
       scope = scope,
       api = api,
       broker = broker,
+      journeyService = journeyService,
       closeActivity = { activityController.pause().stop().destroy() },
     )
   }
