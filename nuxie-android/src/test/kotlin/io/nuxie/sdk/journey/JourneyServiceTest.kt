@@ -323,6 +323,44 @@ class JourneyServiceTest {
   }
 
   @Test
+  fun handleEventForTrigger_doesNotPresentJourneyCompletedWhileStartPersistenceIsInFlight() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      goal = GoalConfig(
+        kind = GoalConfig.Kind.EVENT,
+        eventName = "permission_granted",
+      ),
+      exitPolicy = ExitPolicy(mode = ExitPolicy.Mode.ON_GOAL),
+      trackDelayMillis = 250,
+    )
+    try {
+      harness.service.initialize()
+      val first = async {
+        harness.service.handleEventForTrigger(
+          NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
+        )
+      }
+
+      delay(50)
+      val inFlightJourney = harness.service.getActiveJourneys("user_1").single()
+      harness.service.handleScopedPermissionEvent(
+        journeyId = inFlightJourney.id,
+        eventName = "permission_granted",
+        properties = emptyMap(),
+      )
+
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      val firstResults = first.await()
+
+      assertTrue(firstResults.filterIsInstance<JourneyTriggerResult.Started>().isEmpty())
+      assertTrue(harness.presented.isEmpty())
+      assertEquals(1, harness.api.trackedEvents.count { it.event == "\$journey_start" })
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun handleEventForTrigger_updatesLastFlowShownAnchorWhenFlowPresents() = runBlocking {
     var now = 1_000L
     val harness = newHarness(

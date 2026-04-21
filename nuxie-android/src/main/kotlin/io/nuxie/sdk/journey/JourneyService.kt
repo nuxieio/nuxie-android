@@ -909,6 +909,11 @@ class JourneyService(
       return null
     }
 
+    val currentJourney = inMemoryJourneysById[journey.id]
+    if (currentJourney !== journey || !currentJourney.status.isLive) {
+      return null
+    }
+
     persistJourney(journey)
 
     eventService.track(
