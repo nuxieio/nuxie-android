@@ -1680,16 +1680,27 @@ class FlowJourneyRunner(
   private fun sendViewModelInit() {
     warnConvertersIfNeeded()
     val payload = buildJsonObject(
-      "viewModels" to json.encodeToJsonElement(ListSerializer(io.nuxie.sdk.flows.ViewModel.serializer()), flow.remoteFlow.viewModels),
-      "instances" to json.encodeToJsonElement(ListSerializer(ViewModelInstance.serializer()), viewModels.allInstances()),
-      "converters" to convertersPayload(flow.remoteFlow.converters),
-      "screenDefaults" to json.encodeToJsonElement(
-        MapSerializer(
-          String.serializer(),
-          MapSerializer(String.serializer(), String.serializer())
+      "schemaVersion" to JsonPrimitive(2),
+      "schema" to buildJsonObject(
+        "viewModels" to json.encodeToJsonElement(
+          ListSerializer(io.nuxie.sdk.flows.ViewModel.serializer()),
+          flow.remoteFlow.viewModels,
         ),
-        viewModels.screenDefaultsPayload(),
-      )
+        "converters" to convertersPayload(flow.remoteFlow.converters),
+      ),
+      "state" to buildJsonObject(
+        "viewModelInstances" to json.encodeToJsonElement(
+          ListSerializer(ViewModelInstance.serializer()),
+          viewModels.allInstances(),
+        ),
+        "screenDefaults" to json.encodeToJsonElement(
+          MapSerializer(
+            String.serializer(),
+            MapSerializer(String.serializer(), String.serializer())
+          ),
+          viewModels.screenDefaultsPayload(),
+        ),
+      ),
     )
     scope.launch { host?.sendRuntimeMessage("runtime/view_model_init", payload) }
   }

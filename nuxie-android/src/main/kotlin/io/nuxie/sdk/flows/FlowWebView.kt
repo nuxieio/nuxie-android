@@ -60,6 +60,10 @@ class FlowWebView(
     bridge.send(type = type, payload = payload, replyTo = replyTo)
   }
 
+  fun sendBridgeMessageImmediately(type: String, payload: kotlinx.serialization.json.JsonObject, replyTo: String? = null) {
+    bridge.sendImmediately(type = type, payload = payload, replyTo = replyTo)
+  }
+
   fun isRuntimeReady(): Boolean {
     return bridge.isRuntimeReady()
   }

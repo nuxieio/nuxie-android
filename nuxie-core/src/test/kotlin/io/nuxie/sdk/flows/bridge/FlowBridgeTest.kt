@@ -33,6 +33,23 @@ class FlowBridgeTest {
   }
 
   @Test
+  fun sendImmediately_bypasses_runtime_ready_buffer() {
+    val transport = CapturingTransport()
+    val bridge = FlowBridge(transport)
+
+    bridge.send("runtime/navigate", buildJsonObject { put("screenId", JsonPrimitive("s1")) })
+    bridge.sendImmediately("purchase_confirmed", buildJsonObject { put("productId", JsonPrimitive("prod_1")) })
+
+    assertEquals(1, transport.sent.size)
+    assertEquals("purchase_confirmed", transport.sent.first().type)
+
+    bridge.handleIncomingJson("""{"type":"runtime/ready","payload":{}}""")
+
+    assertEquals(2, transport.sent.size)
+    assertEquals("runtime/navigate", transport.sent[1].type)
+  }
+
+  @Test
   fun ping_replies_immediately_even_before_ready() {
     val transport = CapturingTransport()
     val bridge = FlowBridge(transport)
@@ -47,4 +64,3 @@ class FlowBridgeTest {
     assertTrue(payload["result"]?.toString()?.contains("pong") == true)
   }
 }
-

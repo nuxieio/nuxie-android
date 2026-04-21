@@ -78,6 +78,7 @@ class JourneyServiceTest {
     private val remoteFlow: RemoteFlow,
     private val trackDelayMillis: Long = 0,
     private val trackFailure: Throwable? = null,
+    private val trackFailureEventNames: Set<String>? = null,
   ) : NuxieApiProtocol {
     data class TrackedEvent(
       val event: String,
@@ -114,7 +115,9 @@ class JourneyServiceTest {
       if (trackDelayMillis > 0) {
         delay(trackDelayMillis)
       }
-      trackFailure?.let { throw it }
+      if (trackFailure != null && (trackFailureEventNames == null || event in trackFailureEventNames)) {
+        throw trackFailure
+      }
       recordTrackedEvent(event = event, distinctId = distinctId, properties = properties)
       return EventResponse(status = "ok")
     }
@@ -256,6 +259,31 @@ class JourneyServiceTest {
       assertEquals(1, harness.presented.size)
       assertEquals("flow_1", harness.presented.first().first)
       assertEquals(started!!.journey.id, harness.presented.first().second)
+
+      val startEvent = harness.api.trackedEvents.firstOrNull { it.event == "\$journey_start" }
+      assertNotNull(startEvent)
+      assertEquals(started.journey.id, startEvent?.properties?.get("session_id")?.jsonPrimitive?.contentOrNull)
+      assertEquals("camp_1", startEvent?.properties?.get("campaign_id")?.jsonPrimitive?.contentOrNull)
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
+  fun handleEventForTrigger_doesNotStartJourneyWhenStartPersistenceFails() = runBlocking {
+    val harness = newHarness(
+      reentry = CampaignReentry.EveryTime,
+      trackFailure = IllegalStateException("network_down"),
+    )
+    try {
+      harness.service.initialize()
+      val event = NuxieEvent(id = "evt_1", name = "paywall_trigger", distinctId = "user_1")
+      val results = harness.service.handleEventForTrigger(event)
+
+      assertTrue(results.filterIsInstance<JourneyTriggerResult.Started>().isEmpty())
+      assertTrue(harness.presented.isEmpty())
+      assertTrue(harness.service.getActiveJourneys("user_1").isEmpty())
+      assertTrue(harness.journeyStore.loadActiveJourneys().isEmpty())
     } finally {
       harness.close()
     }
@@ -1242,10 +1270,9 @@ class JourneyServiceTest {
       delay(80)
 
       val activeById = harness.service.getActiveJourneys("user_1").associateBy { it.id }
-      assertEquals(2, activeById.size)
-      assertNotNull(activeById[started.id])
+      assertEquals(1, activeById.size)
+      assertTrue(!activeById.containsKey(started.id))
       assertNotNull(activeById[resumedJourneyId])
-      assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
       assertTrue(activeById[resumedJourneyId]?.convertedAtEpochMillis == null)
     } finally {
       harness.close()
@@ -1298,10 +1325,9 @@ class JourneyServiceTest {
       delay(80)
 
       val activeById = harness.service.getActiveJourneys("user_1").associateBy { it.id }
-      assertEquals(2, activeById.size)
-      assertNotNull(activeById[started.id])
+      assertEquals(1, activeById.size)
+      assertTrue(!activeById.containsKey(started.id))
       assertNotNull(activeById[resumedJourneyId])
-      assertNotNull(activeById[started.id]?.convertedAtEpochMillis)
       assertTrue(activeById[resumedJourneyId]?.convertedAtEpochMillis == null)
     } finally {
       harness.close()
@@ -1631,6 +1657,7 @@ class JourneyServiceTest {
       ),
       exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
       trackFailure = IllegalStateException("track_failed"),
+      trackFailureEventNames = setOf(JourneyEvents.journeyGoalHit),
       presentFlowResult = false,
     )
 
@@ -1673,6 +1700,7 @@ class JourneyServiceTest {
       ),
       exitPolicy = ExitPolicy(ExitPolicy.Mode.ON_GOAL),
       trackFailure = IllegalStateException("track_failed"),
+      trackFailureEventNames = setOf(JourneyEvents.journeyGoalHit),
       queueStore = DroppingEventQueueStore(
         droppedEventNames = setOf(JourneyEvents.journeyGoalHit),
       ),
@@ -1914,6 +1942,7 @@ class JourneyServiceTest {
       ),
       exitPolicy = null,
       trackFailure = IllegalStateException("track_failed"),
+      trackFailureEventNames = setOf(JourneyEvents.journeyGoalHit),
     )
 
     try {
@@ -2194,6 +2223,7 @@ class JourneyServiceTest {
     beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null,
     trackDelayMillis: Long = 0,
     trackFailure: Throwable? = null,
+    trackFailureEventNames: Set<String>? = null,
     historyStore: EventHistoryStore = InMemoryEventHistoryStore(),
     queueStore: EventQueueStore = InMemoryEventQueueStore(),
     nowEpochMillis: () -> Long = { System.currentTimeMillis() },
@@ -2246,6 +2276,7 @@ class JourneyServiceTest {
       remoteFlow = remoteFlow,
       trackDelayMillis = trackDelayMillis,
       trackFailure = trackFailure,
+      trackFailureEventNames = trackFailureEventNames,
     )
     val config = NuxieConfiguration("test_key").apply {
       this.beforeSend = beforeSend

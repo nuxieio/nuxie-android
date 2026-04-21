@@ -334,6 +334,36 @@ class FlowJourneyRunnerTest {
   }
 
   @Test
+  fun runtimeReadySendsV2ViewModelInitPayload() = runBlocking {
+    val harness = newHarness(interactions = emptyMap())
+    try {
+      val outcome = harness.runner.handleRuntimeReady()
+      assertNull(outcome)
+      settle()
+
+      val message = harness.host.runtimeMessages.first { it.type == "runtime/view_model_init" }
+      assertEquals(JsonPrimitive(2), message.payload["schemaVersion"])
+
+      val schema = message.payload["schema"] as? JsonObject
+      val state = message.payload["state"] as? JsonObject
+      assertNotNull(schema)
+      assertNotNull(state)
+
+      val viewModels = schema!!["viewModels"] as? JsonArray
+      val converters = schema["converters"] as? JsonObject
+      val instances = state!!["viewModelInstances"] as? JsonArray
+      val screenDefaults = state["screenDefaults"] as? JsonObject
+
+      assertEquals(JsonPrimitive("vm_main"), (viewModels!!.first() as JsonObject)["id"])
+      assertNotNull(converters)
+      assertEquals(JsonPrimitive("vm_main"), (instances!!.first() as JsonObject)["viewModelId"])
+      assertNotNull(screenDefaults?.get("screen_1"))
+    } finally {
+      harness.close()
+    }
+  }
+
+  @Test
   fun runtimeReadyExecutesGlobalStartInteraction() = runBlocking {
     val interactions = mapOf(
       "__global__" to listOf(

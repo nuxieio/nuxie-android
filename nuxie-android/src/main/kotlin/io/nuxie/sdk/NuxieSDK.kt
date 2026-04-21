@@ -648,10 +648,12 @@ class NuxieSDK private constructor() {
           }
         }
 
+        if (emittedJourneyDecision) {
+          return@launch
+        }
+
         if (gatePlan == null) {
-          if (!emittedJourneyDecision) {
-            emit(TriggerUpdate.Decision(TriggerDecision.NoMatch))
-          }
+          emit(TriggerUpdate.Decision(TriggerDecision.NoMatch))
           return@launch
         }
 

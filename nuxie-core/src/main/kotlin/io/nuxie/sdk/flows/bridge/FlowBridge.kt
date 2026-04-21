@@ -40,6 +40,10 @@ class FlowBridge(
     transport.sendToRuntime(envelope)
   }
 
+  fun sendImmediately(type: String, payload: JsonObject = JsonObject(emptyMap()), replyTo: String? = null) {
+    transport.sendToRuntime(BridgeEnvelope(type = type, payload = payload, replyTo = replyTo))
+  }
+
   /**
    * Send a response envelope immediately (not buffered by runtime readiness).
    */
