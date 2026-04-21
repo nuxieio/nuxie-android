@@ -1680,7 +1680,6 @@ class FlowJourneyRunner(
   private fun sendViewModelInit() {
     warnConvertersIfNeeded()
     val payload = buildJsonObject(
-      "schemaVersion" to JsonPrimitive(2),
       "schema" to buildJsonObject(
         "viewModels" to json.encodeToJsonElement(
           ListSerializer(io.nuxie.sdk.flows.ViewModel.serializer()),
