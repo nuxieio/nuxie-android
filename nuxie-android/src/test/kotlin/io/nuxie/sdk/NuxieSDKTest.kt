@@ -1,6 +1,9 @@
 package io.nuxie.sdk
 
+import android.app.Application
 import android.os.Looper
+import androidx.activity.ComponentActivity
+import androidx.test.core.app.ApplicationProvider
 import io.nuxie.sdk.campaigns.Campaign
 import io.nuxie.sdk.campaigns.CampaignReentry
 import io.nuxie.sdk.campaigns.CampaignTrigger
@@ -30,6 +33,7 @@ import io.nuxie.sdk.identity.DefaultIdentityService
 import io.nuxie.sdk.ir.IRRuntime
 import io.nuxie.sdk.journey.FileJourneyStore
 import io.nuxie.sdk.journey.JourneyService
+import io.nuxie.sdk.lifecycle.CurrentActivityTracker
 import io.nuxie.sdk.network.NuxieApiProtocol
 import io.nuxie.sdk.network.models.ActiveJourney
 import io.nuxie.sdk.network.models.BatchRequest
@@ -41,6 +45,7 @@ import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.session.DefaultSessionService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
 import io.nuxie.sdk.triggers.DefaultTriggerBroker
+import io.nuxie.sdk.triggers.SuppressReason
 import io.nuxie.sdk.triggers.TriggerDecision
 import io.nuxie.sdk.triggers.TriggerUpdate
 import kotlinx.coroutines.CoroutineScope
@@ -56,6 +61,7 @@ import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import java.io.File
@@ -67,6 +73,14 @@ class NuxieSDKTest {
     private val profile: ProfileResponse,
     private val remoteFlow: RemoteFlow,
   ) : NuxieApiProtocol {
+    data class TrackedEvent(
+      val event: String,
+      val uuid: String,
+    )
+
+    var gatePayload: JsonObject? = allowGatePayload()
+    val trackedEvents: MutableList<TrackedEvent> = mutableListOf()
+
     override suspend fun fetchProfile(distinctId: String, locale: String?): ProfileResponse = profile
 
     override suspend fun trackEvent(
@@ -79,20 +93,10 @@ class NuxieSDKTest {
       entityId: String?,
       timestamp: String,
     ): EventResponse {
-      val gatePayload = if (event == "paywall_trigger") {
-        JsonObject(
-          mapOf(
-            "gate" to JsonObject(
-              mapOf("decision" to JsonPrimitive("allow"))
-            )
-          )
-        )
-      } else {
-        null
-      }
+      trackedEvents += TrackedEvent(event = event, uuid = uuid)
       return EventResponse(
         status = "ok",
-        payload = gatePayload,
+        payload = if (event == "paywall_trigger") gatePayload else null,
         event = EventResponse.EventInfo(id = uuid, processed = true),
       )
     }
@@ -119,6 +123,31 @@ class NuxieSDKTest {
         balance = 0,
         type = FeatureType.BOOLEAN,
       )
+    }
+
+    companion object {
+      fun allowGatePayload(): JsonObject {
+        return JsonObject(
+          mapOf(
+            "gate" to JsonObject(
+              mapOf("decision" to JsonPrimitive("allow"))
+            )
+          )
+        )
+      }
+
+      fun showFlowGatePayload(flowId: String): JsonObject {
+        return JsonObject(
+          mapOf(
+            "gate" to JsonObject(
+              mapOf(
+                "decision" to JsonPrimitive("show_flow"),
+                "flowId" to JsonPrimitive(flowId),
+              )
+            )
+          )
+        )
+      }
     }
   }
 
@@ -169,8 +198,12 @@ class NuxieSDKTest {
   private data class Harness(
     val sdk: NuxieSDK,
     val scope: CoroutineScope,
+    val api: FakeApi,
+    val broker: DefaultTriggerBroker,
+    val closeActivity: () -> Unit,
   ) {
     suspend fun close() {
+      closeActivity()
       sdk.shutdown()
       scope.cancel()
     }
@@ -216,8 +249,47 @@ class NuxieSDKTest {
     }
   }
 
+  @Test
+  fun trigger_completesSuppressedShowFlowGateAfterFlowShown() = runBlocking {
+    val harness = newHarness()
+    try {
+      harness.sdk.trigger("paywall_trigger")
+      waitForTrigger { harness.api.trackedEvents.any { it.event == "\$journey_start" } }
+
+      harness.api.gatePayload = FakeApi.showFlowGatePayload("standalone_flow")
+      val updates = mutableListOf<TriggerUpdate>()
+      harness.sdk.trigger("paywall_trigger") { update ->
+        updates += update
+      }
+
+      waitForTrigger {
+        updates.any { it.decisionOrNull() is TriggerDecision.Suppressed } &&
+          updates.any { it.decisionOrNull() is TriggerDecision.FlowShown }
+      }
+      val eventId = harness.api.trackedEvents.last { it.event == "paywall_trigger" }.uuid
+      harness.broker.emit(eventId, TriggerUpdate.Decision(TriggerDecision.NoMatch))
+      shadowOf(Looper.getMainLooper()).idle()
+
+      assertTrue(updates.any { it.decisionOrNull() == TriggerDecision.Suppressed(SuppressReason.AlreadyActive) })
+      assertTrue(updates.any { it.decisionOrNull() is TriggerDecision.FlowShown })
+      assertTrue(updates.none { it.decisionOrNull() == TriggerDecision.NoMatch })
+    } finally {
+      harness.close()
+    }
+  }
+
   private fun TriggerUpdate.decisionOrNull(): TriggerDecision? {
     return (this as? TriggerUpdate.Decision)?.decision
+  }
+
+  private suspend fun waitForTrigger(predicate: () -> Boolean) {
+    var attempts = 0
+    while (!predicate() && attempts < 20) {
+      shadowOf(Looper.getMainLooper()).idle()
+      attempts += 1
+      delay(50)
+    }
+    shadowOf(Looper.getMainLooper()).idle()
   }
 
   private suspend fun newHarness(): Harness {
@@ -286,6 +358,8 @@ class NuxieSDKTest {
     val featureService = FakeFeatureService()
     val cacheDir = Files.createTempDirectory("nuxie_sdk_trigger_test").toFile()
     val broker = DefaultTriggerBroker()
+    val activityTracker = CurrentActivityTracker(ApplicationProvider.getApplicationContext<Application>())
+    val activityController = Robolectric.buildActivity(ComponentActivity::class.java).setup()
     val flowService = FlowService(
       api = api,
       configuration = config,
@@ -314,8 +388,15 @@ class NuxieSDKTest {
     sdk.setPrivateField("journeyService", journeyService)
     sdk.setPrivateField("triggerBroker", broker)
     sdk.setPrivateField("scope", scope)
+    sdk.setPrivateField("activityTracker", activityTracker)
 
-    return Harness(sdk = sdk, scope = scope)
+    return Harness(
+      sdk = sdk,
+      scope = scope,
+      api = api,
+      broker = broker,
+      closeActivity = { activityController.pause().stop().destroy() },
+    )
   }
 
   private fun NuxieSDK.setPrivateField(name: String, value: Any?) {

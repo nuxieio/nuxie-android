@@ -565,6 +565,7 @@ class NuxieSDK private constructor() {
           TriggerDecision.NoMatch,
           -> true
           is TriggerDecision.Suppressed -> !hasGatePlan
+          is TriggerDecision.FlowShown -> mode == TriggerMode.FLOW
           else -> false
         }
         is TriggerUpdate.Entitlement -> when (update.entitlement) {
