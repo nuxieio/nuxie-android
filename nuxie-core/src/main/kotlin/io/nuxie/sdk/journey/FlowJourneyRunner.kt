@@ -156,6 +156,8 @@ class FlowJourneyRunner(
   private var isProcessing: Boolean = false
   @Volatile
   private var processingJob: Job? = null
+  @Volatile
+  private var hasTerminalOutcome: Boolean = false
   private var isPaused: Boolean = false
   private val debounceJobs: MutableMap<String, Job> = mutableMapOf()
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
@@ -192,6 +194,7 @@ class FlowJourneyRunner(
   }
 
   suspend fun handleRuntimeReady(): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     runtimeReady = true
     sendViewModelInit()
 
@@ -217,6 +220,7 @@ class FlowJourneyRunner(
   }
 
   suspend fun handleScreenChanged(screenId: String): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     journey.flowState.currentScreenId = screenId
     val event = makeSystemEvent(
       name = SystemEventNames.screenShown,
@@ -232,6 +236,7 @@ class FlowJourneyRunner(
     screenId: String?,
     instanceId: String?,
   ): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     val resolvedScreen = screenId ?: journey.flowState.currentScreenId
     viewModels.setValue(path, value, resolvedScreen, instanceId)
     journey.flowState.viewModelSnapshot = viewModels.getSnapshot()
@@ -294,6 +299,7 @@ class FlowJourneyRunner(
     instanceId: String?,
     event: NuxieEvent?,
   ): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     if (isPaused) return null
 
     if (journey.flowState.currentScreenId == null && !screenId.isNullOrBlank()) {
@@ -342,6 +348,7 @@ class FlowJourneyRunner(
   }
 
   suspend fun resumePendingAction(reason: ResumeReason, event: NuxieEvent?): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     val pending = journey.flowState.pendingAction ?: return null
 
     isPaused = false
@@ -380,6 +387,7 @@ class FlowJourneyRunner(
   }
 
   fun hasPendingWork(): Boolean {
+    if (hasTerminalOutcome) return false
     if (journey.flowState.pendingAction != null) return true
     if (activeRequest != null) return true
     if (synchronized(actionQueueLock) { actionQueue.isNotEmpty() }) return true
@@ -421,16 +429,21 @@ class FlowJourneyRunner(
 
   private fun enqueueActions(actions: List<InteractionAction>, context: RuntimeTriggerContext) {
     if (actions.isEmpty()) return
+    if (hasTerminalOutcome) return
     synchronized(actionQueueLock) {
-      actionQueue += ActionRequest(actions = actions, context = context)
+      if (!hasTerminalOutcome) {
+        actionQueue += ActionRequest(actions = actions, context = context)
+      }
     }
   }
 
   private suspend fun processQueue(resumeContext: ResumeContext?): FlowRunOutcome? {
+    if (hasTerminalOutcome) return null
     val currentJob = coroutineContext[Job]
     if (isProcessing && processingJob == currentJob) return null
 
     return processMutex.withLock {
+      if (hasTerminalOutcome) return@withLock null
       if (isProcessing) return@withLock null
       isProcessing = true
       processingJob = currentJob
@@ -470,6 +483,7 @@ class FlowJourneyRunner(
                 break@processLoop
               }
               is ActionResult.Exit -> {
+                markTerminalOutcome()
                 outcome = FlowRunOutcome.Exited(result.reason)
                 break@processLoop
               }
@@ -487,6 +501,15 @@ class FlowJourneyRunner(
         processingJob = null
         isProcessing = false
       }
+    }
+  }
+
+  private fun markTerminalOutcome() {
+    hasTerminalOutcome = true
+    activeRequest = null
+    activeIndex = 0
+    synchronized(actionQueueLock) {
+      actionQueue.clear()
     }
   }
 

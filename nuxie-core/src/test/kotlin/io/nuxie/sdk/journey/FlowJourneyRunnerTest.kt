@@ -46,12 +46,15 @@ import io.nuxie.sdk.profile.ProfileService
 import io.nuxie.sdk.segments.SegmentService
 import io.nuxie.sdk.storage.InMemoryKeyValueStore
 import io.nuxie.sdk.triggers.JourneyExitReason
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -697,6 +700,63 @@ class FlowJourneyRunnerTest {
       assertTrue(trackedNames.none { it == "should_not_run" })
     } finally {
       harness?.close()
+    }
+  }
+
+  @Test
+  fun terminalOutcomePreventsWaitingTriggersFromDrainingQueuedActions() = runBlocking {
+    val interactions = mapOf(
+      "__global__" to listOf(
+        Interaction(
+          id = "exit_on_start",
+          trigger = InteractionTrigger.Start(),
+          actions = listOf(
+            InteractionAction.Goal(goalId = "signup_complete", label = "Signed Up"),
+          ),
+          enabled = true,
+        ),
+        Interaction(
+          id = "event_after_exit",
+          trigger = InteractionTrigger.Event(eventName = "after_exit"),
+          actions = listOf(
+            InteractionAction.CallDelegate(message = "should_not_run"),
+          ),
+          enabled = true,
+        ),
+      )
+    )
+    val enteredGoal = CompletableDeferred<Unit>()
+    val releaseGoal = CompletableDeferred<Unit>()
+    val harness = newHarness(
+      interactions = interactions,
+      onGoalActionHit = { _ ->
+        enteredGoal.complete(Unit)
+        releaseGoal.await()
+        GoalActionResolution(shouldExit = true)
+      },
+    )
+    try {
+      val first = async { harness.runner.handleRuntimeReady() }
+      withTimeout(1_000) { enteredGoal.await() }
+
+      val second = async {
+        harness.runner.dispatchEventTrigger(
+          NuxieEvent(name = "after_exit", distinctId = "user_1")
+        )
+      }
+      releaseGoal.complete(Unit)
+
+      val outcome = withTimeout(1_000) { first.await() }
+      withTimeout(1_000) { second.await() }
+      settle()
+
+      val exited = outcome as? FlowRunOutcome.Exited
+      assertNotNull(exited)
+      assertEquals(JourneyExitReason.GOAL_MET, exited?.reason)
+      assertTrue(harness.host.delegateCalls.none { it.first == "should_not_run" })
+      assertTrue(!harness.runner.hasPendingWork())
+    } finally {
+      harness.close()
     }
   }
 
