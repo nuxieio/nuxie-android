@@ -127,6 +127,160 @@ class FlowViewModelRuntimeTest {
   }
 
   @Test
+  fun `prefers screen default instance for shared view model paths`() = runTest {
+    val vm = ViewModel(
+      id = "vm_runtime_root",
+      name = "Runtime",
+      viewModelPathId = 42,
+      properties = mapOf(
+        "paywall" to ViewModelProperty(
+          type = ViewModelPropertyType.OBJECT,
+          propertyId = 10,
+          schema = mapOf(
+            "selectedProductId" to ViewModelProperty(type = ViewModelPropertyType.STRING, propertyId = 9),
+          ),
+        ),
+      ),
+    )
+    val runtime = FlowViewModelRuntime(
+      sampleFlow(
+        viewModels = listOf(vm),
+        instances = listOf(
+          ViewModelInstance(
+            viewModelId = vm.id,
+            instanceId = "welcome_instance",
+            name = "Welcome",
+            values = mapOf(
+              "paywall" to JsonObject(mapOf("selectedProductId" to JsonPrimitive(""))),
+            ),
+          ),
+          ViewModelInstance(
+            viewModelId = vm.id,
+            instanceId = "paywall_instance",
+            name = "Paywall",
+            values = mapOf(
+              "paywall" to JsonObject(mapOf("selectedProductId" to JsonPrimitive("prod_1"))),
+            ),
+          ),
+        ),
+        screens = listOf(
+          RemoteFlowScreen(id = "welcome_screen", defaultViewModelId = vm.id, defaultInstanceId = "welcome_instance"),
+          RemoteFlowScreen(id = "paywall_screen", defaultViewModelId = vm.id, defaultInstanceId = "paywall_instance"),
+        ),
+      )
+    )
+
+    val productId = runtime.getValue(
+      VmPathRef(pathIds = listOf(42, 10, 9)),
+      screenId = "paywall_screen",
+    )
+
+    assertEquals(JsonPrimitive("prod_1"), productId)
+  }
+
+  @Test
+  fun `prefers current screen root for duplicate authored path ids`() = runTest {
+    val sharedRoot = ViewModel(
+      id = "vm_runtime_root",
+      name = "Runtime",
+      viewModelPathId = 42,
+      properties = mapOf(
+        "title" to ViewModelProperty(type = ViewModelPropertyType.STRING, propertyId = 1),
+      ),
+    )
+    val surveyRoot = ViewModel(
+      id = "vm_runtime_root_survey",
+      name = "Runtime Survey",
+      viewModelPathId = 42,
+      properties = mapOf(
+        "reason" to ViewModelProperty(type = ViewModelPropertyType.STRING, propertyId = 2),
+      ),
+    )
+    val runtime = FlowViewModelRuntime(
+      sampleFlow(
+        viewModels = listOf(sharedRoot, surveyRoot),
+        instances = listOf(
+          ViewModelInstance(
+            viewModelId = sharedRoot.id,
+            instanceId = "shared_instance",
+            name = "Shared",
+            values = mapOf("title" to JsonPrimitive("Shared")),
+          ),
+          ViewModelInstance(
+            viewModelId = surveyRoot.id,
+            instanceId = "survey_instance",
+            name = "Survey",
+            values = mapOf("reason" to JsonPrimitive("Too expensive")),
+          ),
+        ),
+        screens = listOf(
+          RemoteFlowScreen(
+            id = "survey_screen",
+            defaultViewModelId = surveyRoot.id,
+            defaultInstanceId = "survey_instance",
+          ),
+        ),
+      )
+    )
+
+    val reason = runtime.getValue(
+      VmPathRef(pathIds = listOf(42, 2)),
+      screenId = "survey_screen",
+    )
+
+    assertEquals(JsonPrimitive("Too expensive"), reason)
+  }
+
+  @Test
+  fun `resolves relative name paths against repeated item instance`() = runTest {
+    val rootVm = ViewModel(
+      id = "vm_runtime_root",
+      name = "Runtime",
+      viewModelPathId = 42,
+      properties = mapOf(
+        "title" to ViewModelProperty(type = ViewModelPropertyType.STRING, propertyId = 1),
+      ),
+    )
+    val itemVm = ViewModel(
+      id = "vm_reasons_item",
+      name = "REASONS item",
+      properties = mapOf(
+        "value" to ViewModelProperty(type = ViewModelPropertyType.STRING, propertyId = 20),
+      ),
+    )
+    val runtime = FlowViewModelRuntime(
+      sampleFlow(
+        viewModels = listOf(rootVm, itemVm),
+        instances = listOf(
+          ViewModelInstance(
+            viewModelId = rootVm.id,
+            instanceId = "screen_root",
+            name = "Survey",
+            values = mapOf("title" to JsonPrimitive("Before you go")),
+          ),
+          ViewModelInstance(
+            viewModelId = itemVm.id,
+            instanceId = "reason_0",
+            name = null,
+            values = mapOf("value" to JsonPrimitive("Too expensive")),
+          ),
+        ),
+        screens = listOf(
+          RemoteFlowScreen(id = "survey_screen", defaultViewModelId = rootVm.id, defaultInstanceId = "screen_root"),
+        ),
+      )
+    )
+
+    val reason = runtime.getValue(
+      VmPathRef(pathIds = listOf(hashNameId("value")), isRelative = true, nameBased = true),
+      screenId = "survey_screen",
+      instanceId = "reason_0",
+    )
+
+    assertEquals(JsonPrimitive("Too expensive"), reason)
+  }
+
+  @Test
   fun `list operations update list_index on referenced view-model items`() = runTest {
     val itemVm = ViewModel(
       id = "item_vm",
@@ -234,4 +388,3 @@ class FlowViewModelRuntimeTest {
     assertEquals(1, afterInsert!!.size)
   }
 }
-

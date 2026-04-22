@@ -888,22 +888,45 @@ class JourneyService(
     if (!originEventId.isNullOrBlank()) {
       journey.setContext("_origin_event_id", originEventId)
     }
-
     inMemoryJourneysById[journey.id] = journey
-    persistJourney(journey)
 
     val flow = runCatching { flowService.fetchFlow(campaign.flowId) }.getOrNull()
     val entryScreenId = flow?.remoteFlow?.screens?.firstOrNull()?.id
 
-    eventService.track(
-      "\$journey_start",
-      properties = mapOf(
-        "session_id" to journey.id,
-        "campaign_id" to campaign.id,
-        "flow_id" to campaign.flowId,
-        "entry_node_id" to entryScreenId,
+    val startEvent = try {
+      eventService.prepareTriggerEvent(
+        "\$journey_start",
+        properties = mapOf(
+          "session_id" to journey.id,
+          "campaign_id" to campaign.id,
+          "flow_id" to campaign.flowId,
+          "entry_node_id" to entryScreenId,
+        )
       )
-    )
+    } catch (error: Throwable) {
+      inMemoryJourneysById.remove(journey.id)
+      NuxieLogger.warning("JourneyService: Failed to persist journey start: ${error.message}", error)
+      return null
+    }
+
+    try {
+      eventService.trackPreparedForTrigger(
+        startEvent,
+        persistToHistory = true,
+      )
+    } catch (error: Throwable) {
+      runCatching { eventService.deleteHistoryEvent(startEvent.id) }
+      inMemoryJourneysById.remove(journey.id)
+      NuxieLogger.warning("JourneyService: Failed to persist journey start: ${error.message}", error)
+      return null
+    }
+
+    val currentJourney = inMemoryJourneysById[journey.id]
+    if (currentJourney !== journey || !currentJourney.status.isLive) {
+      return null
+    }
+
+    persistJourney(journey)
 
     eventService.track(
       JourneyEvents.journeyStarted,

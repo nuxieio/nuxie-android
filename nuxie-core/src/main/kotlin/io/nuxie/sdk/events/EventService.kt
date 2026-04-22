@@ -140,6 +140,16 @@ class EventService(
     }
   }
 
+  suspend fun trackPreparedEventLocalFirst(event: NuxieEvent) {
+    // Runtime actions can be followed by immediate local IR/goal evaluation, so
+    // record history before returning while keeping network delivery async.
+    extractUserProperties(event)
+    runCatching { historyStore.insert(storedEvent(event)) }
+    scope.launch {
+      enqueuePreparedEvent(event, persistToHistory = false, applyUserProperties = false)
+    }
+  }
+
   suspend fun enqueuePreparedEvent(
     event: NuxieEvent,
     persistToHistory: Boolean = true,

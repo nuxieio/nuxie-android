@@ -324,23 +324,15 @@ class FlowViewModelRuntime(private val remoteFlow: RemoteFlow) {
       if (found != null) return found
     }
 
-    if (viewModelId != null) {
-      val firstId = instancesByViewModel[viewModelId]?.firstOrNull()
-      if (firstId != null) {
-        val found = instancesById[firstId]
-        if (found != null) return found
-      }
-    }
-
     if (screenId != null) {
       val defaults = screenDefaults[screenId]
       if (defaults != null) {
         val (defaultVmId, defaultInstanceId) = defaults
         if (defaultInstanceId != null) {
           val found = instancesById[defaultInstanceId]
-          if (found != null) return found
+          if (found != null && (viewModelId == null || found.viewModelId == viewModelId)) return found
         }
-        if (defaultVmId != null) {
+        if (defaultVmId != null && (viewModelId == null || defaultVmId == viewModelId)) {
           val firstId = instancesByViewModel[defaultVmId]?.firstOrNull()
           if (firstId != null) {
             val found = instancesById[firstId]
@@ -350,15 +342,23 @@ class FlowViewModelRuntime(private val remoteFlow: RemoteFlow) {
       }
     }
 
+    if (viewModelId != null) {
+      val firstId = instancesByViewModel[viewModelId]?.firstOrNull()
+      if (firstId != null) {
+        val found = instancesById[firstId]
+        if (found != null) return found
+      }
+    }
+
     return instancesById.values.firstOrNull()
   }
 
   private fun resolvePathInfo(path: VmPathRef, screenId: String?, instanceId: String?): ResolvedPathInfo {
     val ref = path
     val resolved = if (ref.isRelative == true || ref.nameBased == true) {
-      resolveNamePathIds(ref, screenId = screenId)
+      resolveNamePathIds(ref, screenId = screenId, instanceId = instanceId)
     } else {
-      resolvePathIds(ref.pathIds)
+      resolvePathIds(ref.pathIds, screenId = screenId)
     }
 
     if (resolved != null) {
@@ -381,9 +381,15 @@ class FlowViewModelRuntime(private val remoteFlow: RemoteFlow) {
     )
   }
 
-  private fun resolvePathIds(pathIds: List<Int>): Pair<String, List<PathSegment>>? {
+  private fun resolvePathIds(pathIds: List<Int>, screenId: String?): Pair<String, List<PathSegment>>? {
     val root = pathIds.firstOrNull() ?: return null
-    val viewModel = viewModelList.firstOrNull { viewModelPathId(it) == root } ?: return null
+    val screenDefaultViewModel = screenId
+      ?.let { screenDefaults[it]?.first }
+      ?.let { viewModelsById[it] }
+    val viewModel =
+      screenDefaultViewModel?.takeIf { viewModelPathId(it) == root }
+        ?: viewModelList.firstOrNull { viewModelPathId(it) == root }
+        ?: return null
     val propertyIds = pathIds.drop(1)
     if (propertyIds.isEmpty()) return null
 
@@ -413,7 +419,7 @@ class FlowViewModelRuntime(private val remoteFlow: RemoteFlow) {
     return viewModel.id to segments
   }
 
-  private fun resolveNamePathIds(ref: VmPathRef, screenId: String?): Pair<String, List<PathSegment>>? {
+  private fun resolveNamePathIds(ref: VmPathRef, screenId: String?, instanceId: String?): Pair<String, List<PathSegment>>? {
     val pathIds = ref.pathIds
     if (pathIds.isEmpty()) return null
 
@@ -421,7 +427,7 @@ class FlowViewModelRuntime(private val remoteFlow: RemoteFlow) {
     val propertyIds: List<Int>
 
     if (ref.isRelative == true) {
-      val instance = resolveInstance(screenId = screenId, viewModelId = null, instanceId = null) ?: return null
+      val instance = resolveInstance(screenId = screenId, viewModelId = null, instanceId = instanceId) ?: return null
       viewModel = viewModelsById[instance.viewModelId]
       propertyIds = pathIds
     } else {

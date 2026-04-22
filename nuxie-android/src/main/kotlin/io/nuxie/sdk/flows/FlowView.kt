@@ -733,6 +733,10 @@ class FlowView(context: Context) : FrameLayout(context) {
     webView.sendBridgeMessage(type = type, payload = payload, replyTo = replyTo)
   }
 
+  private fun sendImmediateBridgeResult(type: String, payload: JsonObject = JsonObject(emptyMap()), replyTo: String? = null) {
+    webView.sendBridgeMessageImmediately(type = type, payload = payload, replyTo = replyTo)
+  }
+
   fun performPurchase(productId: String) {
     handlePurchase(productId)
   }
@@ -943,7 +947,7 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun handlePurchase(productId: String) {
     val delegate = purchaseDelegate
     if (delegate == null) {
-      webView.sendBridgeMessage(
+      sendImmediateBridgeResult(
         type = "purchase_error",
         payload = buildJsonObject { put("error", JsonPrimitive("purchase_delegate_not_configured")) },
       )
@@ -953,7 +957,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     val s = scope ?: return
     s.launch(Dispatchers.Main) {
       val outcome = runCatching { delegate.purchaseOutcome(productId) }.getOrElse {
-        webView.sendBridgeMessage(
+        sendImmediateBridgeResult(
           type = "purchase_error",
           payload = buildJsonObject { put("error", JsonPrimitive(it.message ?: "purchase_failed")) },
         )
@@ -962,26 +966,26 @@ class FlowView(context: Context) : FrameLayout(context) {
 
       when (val res = outcome.result) {
         PurchaseResult.Success -> {
-          webView.sendBridgeMessage(
+          sendImmediateBridgeResult(
             type = "purchase_ui_success",
             payload = buildJsonObject { put("productId", JsonPrimitive(productId)) },
           )
-          webView.sendBridgeMessage(
+          sendImmediateBridgeResult(
             type = "purchase_confirmed",
             payload = buildJsonObject { put("productId", JsonPrimitive(productId)) },
           )
         }
         PurchaseResult.Cancelled -> {
-          webView.sendBridgeMessage(type = "purchase_cancelled", payload = JsonObject(emptyMap()))
+          sendImmediateBridgeResult(type = "purchase_cancelled", payload = JsonObject(emptyMap()))
         }
         PurchaseResult.Pending -> {
-          webView.sendBridgeMessage(
+          sendImmediateBridgeResult(
             type = "purchase_error",
             payload = buildJsonObject { put("error", JsonPrimitive("purchase_pending")) },
           )
         }
         is PurchaseResult.Failed -> {
-          webView.sendBridgeMessage(
+          sendImmediateBridgeResult(
             type = "purchase_error",
             payload = buildJsonObject { put("error", JsonPrimitive(res.message)) },
           )
@@ -993,7 +997,7 @@ class FlowView(context: Context) : FrameLayout(context) {
   private fun handleRestore() {
     val delegate = purchaseDelegate
     if (delegate == null) {
-      webView.sendBridgeMessage(
+      sendImmediateBridgeResult(
         type = "restore_error",
         payload = buildJsonObject { put("error", JsonPrimitive("purchase_delegate_not_configured")) },
       )
@@ -1002,7 +1006,7 @@ class FlowView(context: Context) : FrameLayout(context) {
     val s = scope ?: return
     s.launch(Dispatchers.Main) {
       val result = runCatching { delegate.restore() }.getOrElse {
-        webView.sendBridgeMessage(
+        sendImmediateBridgeResult(
           type = "restore_error",
           payload = buildJsonObject { put("error", JsonPrimitive(it.message ?: "restore_failed")) },
         )
@@ -1012,9 +1016,9 @@ class FlowView(context: Context) : FrameLayout(context) {
       when (result) {
         is RestoreResult.Success,
         RestoreResult.NoPurchases,
-        -> webView.sendBridgeMessage(type = "restore_success", payload = JsonObject(emptyMap()))
+        -> sendImmediateBridgeResult(type = "restore_success", payload = JsonObject(emptyMap()))
 
-        is RestoreResult.Failed -> webView.sendBridgeMessage(
+        is RestoreResult.Failed -> sendImmediateBridgeResult(
           type = "restore_error",
           payload = buildJsonObject { put("error", JsonPrimitive(result.message)) },
         )
