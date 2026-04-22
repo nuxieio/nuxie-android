@@ -33,6 +33,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
@@ -55,6 +57,7 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.coroutineContext
 import kotlin.math.max
 import kotlin.random.Random
 
@@ -145,9 +148,14 @@ class FlowJourneyRunner(
   private val interactionsById: Map<String, List<Interaction>> = flow.remoteFlow.interactions
 
   private val actionQueue: MutableList<ActionRequest> = mutableListOf()
+  private val actionQueueLock = Any()
+  private val processMutex = Mutex()
   private var activeRequest: ActionRequest? = null
   private var activeIndex: Int = 0
+  @Volatile
   private var isProcessing: Boolean = false
+  @Volatile
+  private var processingJob: Job? = null
   private var isPaused: Boolean = false
   private val debounceJobs: MutableMap<String, Job> = mutableMapOf()
   private val triggerResetJobs: MutableMap<String, Job> = mutableMapOf()
@@ -374,7 +382,7 @@ class FlowJourneyRunner(
   fun hasPendingWork(): Boolean {
     if (journey.flowState.pendingAction != null) return true
     if (activeRequest != null) return true
-    if (actionQueue.isNotEmpty()) return true
+    if (synchronized(actionQueueLock) { actionQueue.isNotEmpty() }) return true
     return false
   }
 
@@ -413,58 +421,72 @@ class FlowJourneyRunner(
 
   private fun enqueueActions(actions: List<InteractionAction>, context: RuntimeTriggerContext) {
     if (actions.isEmpty()) return
-    actionQueue += ActionRequest(actions = actions, context = context)
+    synchronized(actionQueueLock) {
+      actionQueue += ActionRequest(actions = actions, context = context)
+    }
   }
 
   private suspend fun processQueue(resumeContext: ResumeContext?): FlowRunOutcome? {
-    if (isProcessing) return null
-    isProcessing = true
-    try {
-      var localResume = resumeContext
+    val currentJob = coroutineContext[Job]
+    if (isProcessing && processingJob == currentJob) return null
 
-      while (!isPaused) {
-        if (activeRequest == null) {
-          if (actionQueue.isEmpty()) return null
-          activeRequest = actionQueue.removeAt(0)
-          activeIndex = 0
-        }
+    return processMutex.withLock {
+      if (isProcessing) return@withLock null
+      isProcessing = true
+      processingJob = currentJob
+      try {
+        var localResume = resumeContext
+        var outcome: FlowRunOutcome? = null
 
-        val request = activeRequest ?: return null
-
-        while (activeIndex < request.actions.size) {
-          val action = request.actions[activeIndex]
-          val result = executeAction(action, request.context, activeIndex, localResume)
-          localResume = null
-
-          when (result) {
-            is ActionResult.Continue -> activeIndex += 1
-            is ActionResult.StopSequence -> {
-              activeRequest = null
-              activeIndex = 0
-              break
+        processLoop@ while (!isPaused) {
+          if (activeRequest == null) {
+            activeRequest = synchronized(actionQueueLock) {
+              if (actionQueue.isEmpty()) null else actionQueue.removeAt(0)
             }
-            is ActionResult.Pause -> {
-              val resumablePending =
-                attachResumeActions(result.pending, request.actions, activeIndex)
-              isPaused = true
-              journey.flowState.pendingAction = resumablePending
-              return FlowRunOutcome.Paused(resumablePending)
+            if (activeRequest == null) break
+            activeIndex = 0
+          }
+
+          val request = activeRequest ?: break
+
+          while (activeIndex < request.actions.size) {
+            val action = request.actions[activeIndex]
+            val result = executeAction(action, request.context, activeIndex, localResume)
+            localResume = null
+
+            when (result) {
+              is ActionResult.Continue -> activeIndex += 1
+              is ActionResult.StopSequence -> {
+                activeRequest = null
+                activeIndex = 0
+                break
+              }
+              is ActionResult.Pause -> {
+                val resumablePending =
+                  attachResumeActions(result.pending, request.actions, activeIndex)
+                isPaused = true
+                journey.flowState.pendingAction = resumablePending
+                outcome = FlowRunOutcome.Paused(resumablePending)
+                break@processLoop
+              }
+              is ActionResult.Exit -> {
+                outcome = FlowRunOutcome.Exited(result.reason)
+                break@processLoop
+              }
             }
-            is ActionResult.Exit -> {
-              return FlowRunOutcome.Exited(result.reason)
-            }
+          }
+
+          if (activeIndex >= request.actions.size) {
+            activeRequest = null
+            activeIndex = 0
           }
         }
 
-        if (activeIndex >= request.actions.size) {
-          activeRequest = null
-          activeIndex = 0
-        }
+        outcome
+      } finally {
+        processingJob = null
+        isProcessing = false
       }
-
-      return null
-    } finally {
-      isProcessing = false
     }
   }
 
@@ -885,7 +907,13 @@ class FlowJourneyRunner(
       props["screenId"] = resolvedScreen
     }
 
-    eventService.track(action.eventName, properties = props)
+    runCatching {
+      eventService.prepareTriggerEvent(action.eventName, properties = props)
+    }.onSuccess { event ->
+      eventService.trackPreparedEventLocalFirst(event)
+    }.onFailure { error ->
+      NuxieLogger.warning("FlowJourneyRunner: Failed to prepare send_event action: ${error.message}", error)
+    }
     eventService.track(
       JourneyEvents.eventSent,
       properties = JourneyEvents.eventSentProperties(
