@@ -100,7 +100,7 @@ val access = sdk.hasFeature("pro_feature")
 // Force network check
 val result = sdk.checkFeature(featureId = "pro_feature")
 
-// Track usage (fire-and-forget)
+// Track usage in the background
 sdk.useFeature(featureId = "credits", amount = 1.0)
 
 // Track usage and await server response

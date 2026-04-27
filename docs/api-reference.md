@@ -78,7 +78,7 @@ Important `TriggerDecision` values:
 | `suspend fun getCachedFeature(featureId: String, entityId: String? = null): FeatureAccess?` | Reads cache only. |
 | `suspend fun checkFeature(featureId: String, requiredBalance: Int? = null, entityId: String? = null): FeatureCheckResult` | Network-backed entitlement check. |
 | `suspend fun refreshFeature(featureId: String, requiredBalance: Int? = null, entityId: String? = null): FeatureCheckResult` | Alias of `checkFeature(...)`. |
-| `fun useFeature(featureId: String, amount: Double = 1.0, entityId: String? = null, metadata: Map<String, Any?>? = null)` | Fire-and-forget usage event with optimistic local balance decrement. |
+| `fun useFeature(featureId: String, amount: Double = 1.0, entityId: String? = null, metadata: Map<String, Any?>? = null)` | Sends confirmed usage on a background single-event request and logs failures. |
 | `suspend fun useFeatureAndWait(featureId: String, amount: Double = 1.0, entityId: String? = null, setUsage: Boolean = false, metadata: Map<String, Any?>? = null): FeatureUsageResult` | Sends usage and waits for server response. |
 | `suspend fun refreshProfile(): ProfileResponse` | Refetches profile and syncs features. |
 

@@ -1048,21 +1048,17 @@ class NuxieSDK private constructor() {
       NuxieLogger.warning("useFeature called before SDK setup")
       return
     }
-    val events = eventService ?: return
-
-    val props = buildMap<String, Any?> {
-      put("feature_extId", featureId)
-      put("amount", amount)
-      put("value", amount)
-      if (metadata != null) put("metadata", metadata)
-      if (entityId != null) put("entityId", entityId)
-    }
-
-    events.track("\$feature_used", properties = props)
-
-    // Optimistic local balance decrement for instant UI feedback.
-    scope?.launch(Dispatchers.Main) {
-      featureInfo?.decrementBalance(featureId, amount.toInt())
+    scope?.launch {
+      runCatching {
+        useFeatureAndWait(
+          featureId = featureId,
+          amount = amount,
+          entityId = entityId,
+          metadata = metadata,
+        )
+      }.onFailure { error ->
+        NuxieLogger.warning("useFeature failed", error)
+      }
     }
   }
 
