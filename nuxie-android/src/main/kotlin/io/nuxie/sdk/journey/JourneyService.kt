@@ -338,6 +338,7 @@ class JourneyService(
           properties = mapOf(
             "session_id" to journey.id,
             "node_id" to screenId,
+            "async" to true,
             "context" to journey.context.mapValues { (_, v) -> fromJsonElement(v) },
           )
         )
